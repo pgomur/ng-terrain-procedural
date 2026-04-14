@@ -1,5 +1,3 @@
-// src/app/math/chunk-coord.ts
-
 import type {
   ChunkCoord,
   ChunkKey,
@@ -10,7 +8,6 @@ import type {
   FrustumPlanes
 } from '../types/chunk';
 import { NEIGHBOR_OFFSETS, NEIGHBOR_DIRECTIONS } from '../types/chunk';
-import type { TerrainConfig } from '../types/terrain';
 
 /**
 * Generates the unique string key for a chunk

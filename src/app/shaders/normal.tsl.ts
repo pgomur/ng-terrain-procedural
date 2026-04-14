@@ -1,5 +1,4 @@
-import * as THREE from 'three';
-import { If, vec2, vec3, vec4, float, int, uint, Fn, uniform, storage, globalId } from 'three/tsl';
+import { If, vec3, float, int, uint, Fn, uniform, storage, globalId } from 'three/tsl';
 
 /**
  * Calculate normals by finite differences with correct world-space scale.

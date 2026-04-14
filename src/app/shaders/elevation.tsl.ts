@@ -1,6 +1,3 @@
-// src/app/shaders/elevation.tsl.ts
-
-import * as THREE from 'three';
 import {
   If,
   vec2,
@@ -12,11 +9,7 @@ import {
   Fn,
   uniform,
   storage,
-  workgroupArray,
-  workgroupBarrier,
-  globalId,
-  localId,
-  workgroupId,
+  globalId
 } from 'three/tsl';
 
 /**
