@@ -22,6 +22,15 @@ import { TerrainComponent } from '../app/terrain/terrain.component';
         overflow: hidden;
         background-color: #000;
       }
+      :host {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+      .app-container {
+        width: 100%;
+        height: 100%;
+      }
       .ui-overlay {
         position: absolute;
         top: 20px;

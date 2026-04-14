@@ -28,6 +28,8 @@ export class TerrainEngine {
   private gpuGenerator: GPUGenerator | null = null;
   private chunkManager: ChunkManager | null = null;
   private sceneGraph: SceneGraph | null = null;
+  private raycaster = new THREE.Raycaster();
+  private centerMouse = new THREE.Vector2(0, 0);
 
   private initState = signal<EngineInitState>('uninitialized');
   private frameCount = signal<number>(0);
@@ -356,6 +358,13 @@ export class TerrainEngine {
 
   lookAt(x: number, y: number, z: number): void {
     this.camera?.lookAt(x, y, z);
+  }
+
+  getCenterIntersection(): THREE.Intersection | null {
+    if (!this.camera || !this.scene) return null;
+    this.raycaster.setFromCamera(this.centerMouse, this.camera);
+    const intersects = this.raycaster.intersectObjects(this.scene.children, true);
+    return intersects.length > 0 ? intersects[0] : null;
   }
 
   dispose(): void {

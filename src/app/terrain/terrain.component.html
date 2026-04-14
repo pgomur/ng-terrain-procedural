@@ -1,0 +1,83 @@
+<div class="terrain-viewport">
+  <canvas #terrainCanvas></canvas>
+
+  <div class="engine-diagnostics" *ngIf="showDiagnostics && engine.state().isReady">
+    <div class="diagnostic-panel">
+      <h3>WebGPU Terrain Engine</h3>
+      <div class="metric-row">
+        <span class="label">FPS</span>
+        <span class="value" [class.warning]="engine.state().fps < 30">
+          {{ engine.state().fps | number: '1.0-0' }}
+        </span>
+      </div>
+      <div class="metric-row">
+        <span class="label">Visible Chunks</span>
+        <span class="value">{{ engine.chunkState()?.stats?.visibleCount || 0 }}</span>
+      </div>
+      <div class="metric-row">
+        <span class="label">Total in Memory</span>
+        <span class="value">{{ engine.chunkState()?.stats?.readyCount || 0 }}</span>
+      </div>
+      <div class="metric-row">
+        <span class="label">Generating GPU</span>
+        <span class="value">{{ engine.chunkState()?.stats?.generatingCount || 0 }}</span>
+      </div>
+      <div class="metric-row">
+        <span class="label">Pending Queue</span>
+        <span class="value">{{ engine.chunkState()?.stats?.pendingCount || 0 }}</span>
+      </div>
+
+      <div
+        class="metric-row vram-metric"
+        *ngIf="engine.chunkState()?.stats?.totalVRAM !== undefined"
+      >
+        <span class="label">VRAM Estimated</span>
+        <span class="value">
+          {{ engine.chunkState()!.stats.totalVRAM / 1048576 | number: '1.1-2' }} MB
+        </span>
+      </div>
+
+      <div class="metric-row coord-metric">
+        <span class="label">Coordinates (X, Y, Z)</span>
+        <span class="value coord-value">
+          {{ currentX | number: '1.0-0' }} : {{ currentY | number: '1.0-0' }} :
+          {{ currentZ | number: '1.0-0' }}
+        </span>
+      </div>
+      <div class="metric-row">
+        <span class="label">Speed</span>
+        <span class="value">{{ currentSpeed | number: '1.0-0' }} u/s</span>
+      </div>
+    </div>
+
+    <div class="controls-hint">
+      Click on the terrain to navigate<br />(WASD + Shift + Mouse to look)
+    </div>
+  </div>
+
+  <div class="loading-overlay" *ngIf="engine.state().initState === 'initializing'">
+    <div class="spinner"></div>
+    <p>Initializing WebGPU pipeline...</p>
+  </div>
+
+  <div class="error-overlay" *ngIf="engine.state().initState === 'failed'">
+    <div class="error-message">
+      <h3>Critical Hardware Error</h3>
+      <p>
+        WebGPU could not be initialized. Please check that your browser or GPU backend supports it
+        correctly.
+      </p>
+    </div>
+  </div>
+
+  <div class="precision-crosshair" *ngIf="isPointerLocked">
+    <svg viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg">
+      <g class="crosshair-axes">
+        <line x1="20" y1="12" x2="20" y2="17" />
+        <line x1="20" y1="23" x2="20" y2="28" />
+        <line x1="12" y1="20" x2="17" y2="20" />
+        <line x1="23" y1="20" x2="28" y2="20" />
+      </g>
+    </svg>
+  </div>
+</div>
