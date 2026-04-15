@@ -5,19 +5,19 @@ import type {
   WorldPosition,
   ChunkBounds,
   NeighborMask,
-  FrustumPlanes
+  FrustumPlanes,
 } from '../types/chunk';
 import { NEIGHBOR_OFFSETS, NEIGHBOR_DIRECTIONS } from '../types/chunk';
 
 /**
-* Generates the unique string key for a chunk
+ * Generates the unique string key for a chunk
  */
 export function getChunkKey(coord: ChunkCoord): ChunkKey {
   return `${coord.x}:${coord.z}:${coord.lod}`;
 }
 
 /**
-* Parse a chunk key to coordinates
+ * Parse a chunk key to coordinates
  */
 export function parseChunkKey(key: ChunkKey): ChunkCoord {
   const parts = key.split(':');
@@ -43,7 +43,7 @@ export function getChunkOrigin(coord: ChunkCoord, chunkSize: number): WorldPosit
   return {
     x: coord.x * chunkSize,
     y: 0,
-    z: coord.z * chunkSize
+    z: coord.z * chunkSize,
   };
 }
 
@@ -55,7 +55,7 @@ export function getChunkCenter(coord: ChunkCoord, chunkSize: number): WorldPosit
   return {
     x: origin.x + chunkSize / 2,
     y: 0,
-    z: origin.z + chunkSize / 2
+    z: origin.z + chunkSize / 2,
   };
 }
 
@@ -65,7 +65,7 @@ export function getChunkCenter(coord: ChunkCoord, chunkSize: number): WorldPosit
 export function worldToChunkCoord(
   pos: WorldPosition,
   chunkSize: number,
-  lod: ChunkLOD
+  lod: ChunkLOD,
 ): ChunkCoord {
   const x = Math.floor(pos.x / chunkSize);
   const z = Math.floor(pos.z / chunkSize);
@@ -78,7 +78,7 @@ export function worldToChunkCoord(
  */
 export function selectLODForDistance(
   distance: number,
-  lodDistances: readonly [number, number, number]
+  lodDistances: readonly [number, number, number],
 ): ChunkLOD {
   if (distance <= lodDistances[0]) return 0;
   if (distance <= lodDistances[1]) return 1;
@@ -89,10 +89,7 @@ export function selectLODForDistance(
 /**
  * Calculate 2D Euclidean (XZ) distance from the camera to the center of the chunk
  */
-export function distanceToChunk(
-  cameraPos: WorldPosition,
-  chunkCenter: WorldPosition
-): number {
+export function distanceToChunk(cameraPos: WorldPosition, chunkCenter: WorldPosition): number {
   const dx = cameraPos.x - chunkCenter.x;
   const dz = cameraPos.z - chunkCenter.z;
   return Math.sqrt(dx * dx + dz * dz);
@@ -104,7 +101,7 @@ export function distanceToChunk(
 export function distance3DToChunk(
   cameraPos: WorldPosition,
   chunkCenter: WorldPosition,
-  chunkHeight: number = 0
+  chunkHeight: number = 0,
 ): number {
   const dx = cameraPos.x - chunkCenter.x;
   const dy = cameraPos.y - (chunkCenter.y + chunkHeight / 2);
@@ -113,11 +110,11 @@ export function distance3DToChunk(
 }
 
 /**
-* Calculates the neighbor mask for seam fitting (T-junction correction)
+ * Calculates the neighbor mask for seam fitting (T-junction correction)
  */
 export function calculateNeighborMask(
   coord: ChunkCoord,
-  activeChunks: ReadonlyMap<ChunkKey, { meta: { lod: ChunkLOD } }>
+  activeChunks: ReadonlyMap<ChunkKey, { meta: { lod: ChunkLOD } }>,
 ): NeighborMask {
   let mask = 0;
 
@@ -130,19 +127,19 @@ export function calculateNeighborMask(
     const neighborCoord: ChunkCoord = {
       x: coord.x + offset.dx,
       z: coord.z + offset.dz,
-      lod: coord.lod
+      lod: coord.lod,
     };
 
     const neighborKey = getChunkKey(neighborCoord);
     const neighbor = activeChunks.get(neighborKey);
 
     if (!neighbor) {
-      mask |= (1 << i);
+      mask |= 1 << i;
       continue;
     }
 
     if (neighbor.meta.lod > coord.lod) {
-      mask |= (1 << i);
+      mask |= 1 << i;
     }
   }
 
@@ -150,12 +147,12 @@ export function calculateNeighborMask(
 }
 
 /**
-* Calculates the mask using only the LODs of the four neighbors
-* Returns null if any neighbor is unavailable
+ * Calculates the mask using only the LODs of the four neighbors
+ * Returns null if any neighbor is unavailable
  */
 export function calculateNeighborMaskFast(
   currentLOD: ChunkLOD,
-  neighborLODs: [number | null, number | null, number | null, number | null]
+  neighborLODs: [number | null, number | null, number | null, number | null],
 ): NeighborMask | null {
   let mask = 0;
 
@@ -165,7 +162,7 @@ export function calculateNeighborMaskFast(
     if (neighborLOD === null) return null;
 
     if (neighborLOD > currentLOD) {
-      mask |= (1 << i);
+      mask |= 1 << i;
     }
   }
 
@@ -173,13 +170,10 @@ export function calculateNeighborMaskFast(
 }
 
 /**
-* For each frustum plane, calculate the signed distance
-* from the center of the sphere to the plane. If < -radius, it is completely outside
+ * For each frustum plane, calculate the signed distance
+ * from the center of the sphere to the plane. If < -radius, it is completely outside
  */
-export function intersectsFrustum(
-  bounds: ChunkBounds,
-  planes: FrustumPlanes
-): boolean {
+export function intersectsFrustum(bounds: ChunkBounds, planes: FrustumPlanes): boolean {
   for (let i = 0; i < 6; i++) {
     const normal = planes.normals[i];
     const constant = planes.constants[i];
@@ -204,16 +198,16 @@ export function intersectsFrustum(
  */
 export function intersectsFrustumAABB(
   bounds: ChunkBounds,
-  planes: FrustumPlanes
+  planes: FrustumPlanes,
+  epsilon: number = 8.0,
 ): boolean {
-  // Para cada plano, test contra AABB
   for (let i = 0; i < 6; i++) {
     const normal = planes.normals[i];
     const constant = planes.constants[i];
 
-    const px = normal.x > 0 ? bounds.max.x : bounds.min.x;
-    const py = normal.y > 0 ? bounds.max.y : bounds.min.y;
-    const pz = normal.z > 0 ? bounds.max.z : bounds.min.z;
+    const px = normal.x > 0 ? bounds.max.x + epsilon : bounds.min.x - epsilon;
+    const py = normal.y > 0 ? bounds.max.y + epsilon : bounds.min.y - epsilon;
+    const pz = normal.z > 0 ? bounds.max.z + epsilon : bounds.min.z - epsilon;
 
     const distance = normal.x * px + normal.y * py + normal.z * pz + constant;
 
@@ -233,7 +227,7 @@ export function getVisibleChunkCoords(
   cameraPos: WorldPosition,
   lodDistances: readonly [number, number, number],
   chunkSize: number,
-  maxChunks: number
+  maxChunks: number,
 ): Set<ChunkKey> {
   const visible = new Set<ChunkKey>();
 
@@ -249,15 +243,13 @@ export function getVisibleChunkCoords(
   let dz = -1;
 
   for (let i = 0; i < maxChunks * 2; i++) {
-    if (-chunksRadius <= x && x <= chunksRadius &&
-        -chunksRadius <= z && z <= chunksRadius) {
-
+    if (-chunksRadius <= x && x <= chunksRadius && -chunksRadius <= z && z <= chunksRadius) {
       const chunkX = centerX + x;
       const chunkZ = centerZ + z;
 
       // Calcular distancia para determinar LOD
       const origin = getChunkOrigin({ x: chunkX, z: chunkZ, lod: 0 }, chunkSize);
-      const center = { ...origin, x: origin.x + chunkSize/2, z: origin.z + chunkSize/2 };
+      const center = { ...origin, x: origin.x + chunkSize / 2, z: origin.z + chunkSize / 2 };
       const dist = distanceToChunk(cameraPos, center);
       const lod = selectLODForDistance(dist, lodDistances);
 
@@ -280,10 +272,7 @@ export function getVisibleChunkCoords(
 /**
  * Calculate the vertex resolution for a given LOD level
  */
-export function getResolutionForLOD(
-  lod: ChunkLOD,
-  resolutions: Record<ChunkLOD, number>
-): number {
+export function getResolutionForLOD(lod: ChunkLOD, resolutions: Record<ChunkLOD, number>): number {
   return resolutions[lod];
 }
 

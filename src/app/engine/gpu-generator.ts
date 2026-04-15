@@ -3,7 +3,6 @@ import { WebGPURenderer } from 'three/webgpu';
 import { storage } from 'three/tsl';
 
 import { createElevationComputeNode } from '../shaders/elevation.tsl';
-import { createNormalComputeNode } from '../shaders/normal.tsl';
 import { ChunkCoord, ChunkGeometryData, ChunkBounds, ChunkGPUResources } from '../types/chunk';
 import { TerrainConfig } from '../types/terrain';
 
@@ -21,11 +20,8 @@ export class GPUGenerator {
     number,
     {
       elevationNode: ReturnType<typeof createElevationComputeNode>;
-      normalNode: ReturnType<typeof createNormalComputeNode>;
       positionStorageNode: any;
-      normalStorageNode: any;
       elevationCompute: any;
-      normalCompute: any;
     }
   >();
 
@@ -61,24 +57,20 @@ export class GPUGenerator {
     readyToRender: boolean;
   }> {
     if (!this.device || !this.queue) {
-      throw new Error('WebGPU no inicializado');
+      throw new Error('WebGPU not initialized');
     }
 
     const resolution = this.config.CHUNK_RESOLUTIONS[coord.lod];
     const vertexCount = resolution * resolution;
 
     const pipeline = this.getComputePipeline(resolution);
-
     const positionStorage = this.getStorageBuffer(vertexCount);
-    const normalStorage = this.getStorageBuffer(vertexCount * 4);
 
     pipeline.positionStorageNode.value = positionStorage;
-    pipeline.normalStorageNode.value = normalStorage;
 
     this.updateElevationUniforms(pipeline.elevationNode, coord);
 
     this.renderer.compute(pipeline.elevationCompute as any);
-    this.renderer.compute(pipeline.normalCompute as any);
 
     await this.waitForGPU();
 
@@ -87,17 +79,14 @@ export class GPUGenerator {
     }
 
     let posGPUBuffer = this.extractGPUBuffer(positionStorage);
-    let normGPUBuffer = this.extractGPUBuffer(normalStorage);
-
-    if (!posGPUBuffer || !normGPUBuffer) {
+    if (!posGPUBuffer) {
       await new Promise((r) => requestAnimationFrame(r));
       posGPUBuffer = this.extractGPUBuffer(positionStorage);
-      normGPUBuffer = this.extractGPUBuffer(normalStorage);
     }
 
     const gpuResources: ChunkGPUResources = {
       positionBuffer: positionStorage,
-      normalBuffer: normalStorage,
+      normalBuffer: null, // Normals removed for optimization
       indexBuffer: this.getIndexBuffer(resolution),
       uniformBuffer: null,
       bindGroup: null,
@@ -105,16 +94,15 @@ export class GPUGenerator {
       vertexCount: vertexCount,
     } as unknown as ChunkGPUResources;
 
-    if (posGPUBuffer && normGPUBuffer) {
-      const { positions, normals, minHeight, maxHeight } = await this.readbackGeometry(
+    if (posGPUBuffer) {
+      const { positions, minHeight, maxHeight } = await this.readbackGeometry(
         posGPUBuffer,
-        normGPUBuffer,
         resolution,
       );
 
       const geometry: ChunkGeometryData = {
         positions,
-        normals,
+        normals: new Float32Array(0), // Empty array to fulfill type requirement
         indices: this.generateIndices(resolution),
         bounds: { minHeight, maxHeight },
       };
@@ -142,28 +130,15 @@ export class GPUGenerator {
       const posAttr = new THREE.InstancedBufferAttribute(posDummy, 1) as StorageBufferAttribute;
       posAttr.isStorageBufferAttribute = true;
 
-      const normDummy = new Float32Array(vertexCount * 4);
-      const normAttr = new THREE.InstancedBufferAttribute(normDummy, 1) as StorageBufferAttribute;
-      normAttr.isStorageBufferAttribute = true;
-
       const positionStorageNode = storage(posAttr as any, 'float', vertexCount);
-      const normalStorageNode = storage(normAttr as any, 'float', vertexCount * 4);
 
       const elevationNode = createElevationComputeNode(resolution);
       const elevationCompute = elevationNode.computeFn(positionStorageNode).compute(vertexCount);
 
-      const normalNode = createNormalComputeNode(resolution);
-      const normalCompute = normalNode
-        .computeFn(positionStorageNode, normalStorageNode)
-        .compute(vertexCount);
-
       this.computePipelines.set(resolution, {
         elevationNode,
-        normalNode,
         positionStorageNode,
-        normalStorageNode,
         elevationCompute,
-        normalCompute,
       });
     }
     return this.computePipelines.get(resolution)!;
@@ -258,11 +233,9 @@ export class GPUGenerator {
 
   private async readbackGeometry(
     positionBuffer: GPUBuffer,
-    normalBuffer: GPUBuffer,
     resolution: number,
   ): Promise<{
     positions: Float32Array;
-    normals: Float32Array;
     minHeight: number;
     maxHeight: number;
   }> {
@@ -276,24 +249,18 @@ export class GPUGenerator {
 
     const vertexCount = resolution * resolution;
     const posSize = vertexCount * 4;
-    const normSize = vertexCount * 16;
 
     const posStaging = this.getStagingBuffer(posSize);
-    const normStaging = this.getStagingBuffer(normSize);
 
     const encoder = this.device.createCommandEncoder();
     encoder.copyBufferToBuffer(positionBuffer, 0, posStaging, 0, posSize);
-    encoder.copyBufferToBuffer(normalBuffer, 0, normStaging, 0, normSize);
     this.queue.submit([encoder.finish()]);
 
     await posStaging.mapAsync(GPUMapMode.READ);
-    await normStaging.mapAsync(GPUMapMode.READ);
 
     const posMapped = new Float32Array(posStaging.getMappedRange());
-    const normMapped = new Float32Array(normStaging.getMappedRange());
 
     const positions = new Float32Array(vertexCount * 3);
-    const normals = new Float32Array(vertexCount * 3);
     let minHeight = Infinity,
       maxHeight = -Infinity;
 
@@ -308,19 +275,12 @@ export class GPUGenerator {
       positions[i * 3] = (x / (resolution - 1)) * this.config.CHUNK_SIZE;
       positions[i * 3 + 1] = height;
       positions[i * 3 + 2] = (z / (resolution - 1)) * this.config.CHUNK_SIZE;
-
-      normals[i * 3] = normMapped[i * 4];
-      normals[i * 3 + 1] = normMapped[i * 4 + 1];
-      normals[i * 3 + 2] = normMapped[i * 4 + 2];
     }
 
     posStaging.unmap();
-    normStaging.unmap();
-
     this.releaseStagingBuffer(posSize, posStaging);
-    this.releaseStagingBuffer(normSize, normStaging);
 
-    return { positions, normals, minHeight, maxHeight };
+    return { positions, minHeight, maxHeight };
   }
 
   private getStagingBuffer(size: number): GPUBuffer {
@@ -398,7 +358,6 @@ export class GPUGenerator {
     };
     const center = { x: (min.x + max.x) / 2, y: (min.y + max.y) / 2, z: (min.z + max.z) / 2 };
 
-    // Radio conservador para culling por esfera
     const radius = Math.sqrt(
       3 * Math.pow(this.config.CHUNK_SIZE / 2, 2) + Math.pow(maxH - minH, 2) / 2,
     );
@@ -418,7 +377,7 @@ export class GPUGenerator {
     };
 
     returnToPool(resources.positionBuffer);
-    returnToPool(resources.normalBuffer);
+    // Normals are now null, nothing to release
   }
 
   dispose() {

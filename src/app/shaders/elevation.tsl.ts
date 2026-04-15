@@ -35,8 +35,6 @@ const hash22 = Fn(([p]: [ReturnType<typeof vec2>]) => {
 /**
  * TSL node for 2D Simplex Noise
  * Standard implementation with mod 289 for permutation
- * Note: In WebGPU, I keep the coordinate range controlled
- * to avoid degraded accuracy at very high values
  */
 const simplexNoise2D = Fn(([p_immutable]: [ReturnType<typeof vec2>]) => {
   const p = vec2(p_immutable);
@@ -71,9 +69,8 @@ const simplexNoise2D = Fn(([p_immutable]: [ReturnType<typeof vec2>]) => {
 });
 
 /**
- * FBM with manual unwound loop (TSL does not support dynamic loops)
- * in compute shaders natively)
- * Maximum 8 octaves per design
+ * FBM with manual unwound loop (TSL does not support dynamic loops natively in compute)
+ * Maximum 6 octaves for better optimization
  */
 const fbm = Fn(
   ([p, octavesVal, persistenceVal, lacunarityVal]: [
@@ -89,7 +86,7 @@ const fbm = Fn(
 
     const octaves = int(octavesVal);
 
-    // 8 iterations maximum
+    // 6 iterations maximum (Precise loop unrolling)
     const i0 = int(0);
     If(i0.lessThan(octaves), () => {
       total.addAssign(simplexNoise2D(p.mul(frequency)).mul(amplitude));
@@ -131,22 +128,6 @@ const fbm = Fn(
                 maxValue.addAssign(amplitude);
                 amplitude.mulAssign(persistenceVal);
                 frequency.mulAssign(lacunarityVal);
-
-                const i6 = int(6);
-                If(i6.lessThan(octaves), () => {
-                  total.addAssign(simplexNoise2D(p.mul(frequency)).mul(amplitude));
-                  maxValue.addAssign(amplitude);
-                  amplitude.mulAssign(persistenceVal);
-                  frequency.mulAssign(lacunarityVal);
-
-                  const i7 = int(7);
-                  If(i7.lessThan(octaves), () => {
-                    total.addAssign(simplexNoise2D(p.mul(frequency)).mul(amplitude));
-                    maxValue.addAssign(amplitude);
-                    amplitude.mulAssign(persistenceVal);
-                    frequency.mulAssign(lacunarityVal);
-                  });
-                });
               });
             });
           });
@@ -159,7 +140,7 @@ const fbm = Fn(
 );
 
 /**
- * Domain Warping - coordinate distortion for organic terrain
+ * Domain Warping - Simplified version (1 PASS)
  */
 const domainWarp = Fn(
   ([p, warpStrength, warpOctaves, warpScale, baseOctaves, basePersistence, baseLacunarity]: [
@@ -171,10 +152,9 @@ const domainWarp = Fn(
     ReturnType<typeof float>,
     ReturnType<typeof float>,
   ]) => {
-    const warpX = fbm(p.mul(warpScale), warpOctaves, float(0.5), float(2.0));
-    const warpY = fbm(p.mul(warpScale).add(vec2(5.2, 1.3)), warpOctaves, float(0.5), float(2.0));
-
-    const warpedP = vec2(p.x.add(warpX.mul(warpStrength)), p.y.add(warpY.mul(warpStrength)));
+    // Single FBM pass for offset
+    const offset = fbm(p.mul(warpScale).add(vec2(1.7, 9.2)), warpOctaves, float(0.5), float(2.0));
+    const warpedP = p.add(offset.mul(warpStrength));
 
     return fbm(warpedP, baseOctaves, basePersistence, baseLacunarity);
   },
@@ -182,7 +162,6 @@ const domainWarp = Fn(
 
 /**
  * Interface for shader parameters
- * 1:1 mapping to the CPU uniform buffer
  */
 export interface ElevationUniforms {
   chunkOriginX: number;
@@ -201,13 +180,6 @@ export interface ElevationUniforms {
   warpScale: number;
 }
 
-/**
- * Create the elevation compute node
- *
- * The node is built using uniform TSLs that are updated
- * from the CPU before each dispatch. The output buffer is connected via
- * storage() when the final compute node is created.
- */
 export function createElevationComputeNode(resolution: number) {
   const uChunkOriginX = uniform(float(0));
   const uChunkOriginZ = uniform(float(0));
@@ -218,15 +190,11 @@ export function createElevationComputeNode(resolution: number) {
   const uLacunarity = uniform(float(2.0));
   const uHeightScale = uniform(float(100));
   const uOffsetY = uniform(float(0));
-  const uWarpEnabled = uniform(float(1));
+  const uWarpEnabled = uniform(float(0));
   const uWarpStrength = uniform(float(0.3));
-  const uWarpOctaves = uniform(float(2));
+  const uWarpOctaves = uniform(float(1));
   const uWarpScale = uniform(float(0.5));
 
-  /**
-   * Main compute function
-   * Writes directly to the storage buffer passed as a parameter
-   */
   const computeFn = Fn(([outputBuffer]: [ReturnType<typeof storage>]) => {
     const globalIdx = int(uint(globalId).x);
     const res = int(resolution);
@@ -294,11 +262,6 @@ export function createElevationComputeNode(resolution: number) {
   };
 }
 
-/**
- * Standard bind group layout for WebGPU.
- * Binding 0: Uniform buffer (chunk parameters)
- * Binding 1: Storage buffer (output heightmap)
- */
 export const ELEVATION_BIND_GROUP_LAYOUT = {
   entries: [
     {
@@ -314,8 +277,4 @@ export const ELEVATION_BIND_GROUP_LAYOUT = {
   ],
 } as const;
 
-/**
- * Uniform buffer size in bytes (std140 layout)
- * 16 floats * 4 bytes = 64 bytes (aligned to 16)
- */
 export const ELEVATION_UNIFORM_SIZE = 64;

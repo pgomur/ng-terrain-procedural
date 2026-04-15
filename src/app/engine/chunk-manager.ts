@@ -442,11 +442,11 @@ export class ChunkManager {
     for (const chunk of this.activeChunks().values()) {
       if (chunk.gpu) {
         const res = chunk.meta.resolution;
-        total += res * res * 4;
-        total += res * res * 16;
-        total += (res - 1) * (res - 1) * 6 * 2;
+        total += res * res * 4; // Position buffer
+        total += (res - 1) * (res - 1) * 6 * 2; // Index buffer
       }
     }
+
     return total;
   }
 

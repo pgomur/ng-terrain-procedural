@@ -11,7 +11,7 @@ import {
   EngineInitState,
   CameraState,
 } from '../types/terrain';
-import { ChunkSystemState, FrustumPlanes, Chunk, ChunkKey } from '../types/chunk';
+import { ChunkSystemState, FrustumPlanes, Chunk, ChunkKey, WorldPosition } from '../types/chunk';
 import { getChunkKey } from '../math/chunk-coord';
 
 @Injectable()
@@ -264,11 +264,13 @@ export class TerrainEngine {
   private update(frameTime: number): void {
     if (!this.camera || !this.chunkManager) return;
 
+    this.camera.updateMatrixWorld(true);
+
     const cameraMoved = !this.camera.matrixWorld.equals(this.lastCameraMatrix);
 
     if (cameraMoved || !this.lastCameraState || !this.lastFrustum) {
       const camState = this.buildCameraState();
-      const frustum = this.extractFrustumPlanes(camState);
+      const frustum = this.extractFrustumPlanes();
 
       this.lastCameraState = camState;
       this.lastFrustum = frustum;
@@ -306,46 +308,30 @@ export class TerrainEngine {
     };
   }
 
-  private extractFrustumPlanes(camera: CameraState): FrustumPlanes {
-    const vp = camera.viewProjectionMatrix;
-    const planes = {
-      normals: [] as { x: number; y: number; z: number }[],
-      constants: [] as number[],
-    };
+  /**
+   * Extracts the frustum planes of the current camera.
+   * Uses Three.js native infrastructure for robustness with WebGPU.
+   */
+  private extractFrustumPlanes(): FrustumPlanes {
+    if (!this.camera) throw new Error('Camera not initialized');
 
-    const extractPlane = (a: number, b: number, c: number, d: number) => {
-      const len = Math.sqrt(a * a + b * b + c * c);
-      return {
-        normal: { x: a / len, y: b / len, z: c / len },
-        constant: d / len,
-      };
-    };
+    const frustum = new THREE.Frustum();
+    const projScreenMatrix = new THREE.Matrix4().multiplyMatrices(
+      this.camera.projectionMatrix,
+      this.camera.matrixWorldInverse,
+    );
+    frustum.setFromProjectionMatrix(projScreenMatrix);
 
-    let p = extractPlane(vp[3] + vp[0], vp[7] + vp[4], vp[11] + vp[8], vp[15] + vp[12]);
-    planes.normals.push(p.normal);
-    planes.constants.push(p.constant);
+    const normals: WorldPosition[] = [];
+    const constants: number[] = [];
 
-    p = extractPlane(vp[3] - vp[0], vp[7] - vp[4], vp[11] - vp[8], vp[15] - vp[12]);
-    planes.normals.push(p.normal);
-    planes.constants.push(p.constant);
+    for (let i = 0; i < 6; i++) {
+      const plane = frustum.planes[i];
+      normals.push({ x: plane.normal.x, y: plane.normal.y, z: plane.normal.z });
+      constants.push(plane.constant);
+    }
 
-    p = extractPlane(vp[3] - vp[1], vp[7] - vp[5], vp[11] - vp[9], vp[15] - vp[13]);
-    planes.normals.push(p.normal);
-    planes.constants.push(p.constant);
-
-    p = extractPlane(vp[3] + vp[1], vp[7] + vp[5], vp[11] + vp[9], vp[15] + vp[13]);
-    planes.normals.push(p.normal);
-    planes.constants.push(p.constant);
-
-    p = extractPlane(vp[3] + vp[2], vp[7] + vp[6], vp[11] + vp[10], vp[15] + vp[14]);
-    planes.normals.push(p.normal);
-    planes.constants.push(p.constant);
-
-    p = extractPlane(vp[3] - vp[2], vp[7] - vp[6], vp[11] - vp[10], vp[15] - vp[14]);
-    planes.normals.push(p.normal);
-    planes.constants.push(p.constant);
-
-    return planes as FrustumPlanes;
+    return { normals, constants };
   }
 
   setCameraPosition(x: number, y: number, z: number): void {
