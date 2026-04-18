@@ -1,4 +1,4 @@
-import { signal, computed, effect, Signal, untracked } from '@angular/core';
+import { signal, computed, Signal, untracked } from '@angular/core';
 
 import {
   Chunk,
@@ -10,6 +10,8 @@ import {
   FrustumPlanes,
   ChunkBounds,
   ChunkMetrics,
+  StreamingRequest,
+  ConcurrencySlot,
 } from '../types/chunk';
 import { TerrainConfig, CameraState, PerformanceSnapshot } from '../types/terrain';
 import { GPUGenerator } from './gpu-generator';
@@ -17,12 +19,286 @@ import {
   getChunkKey,
   distanceToChunk,
   selectLODForDistance,
-  intersectsFrustum,
   calculateNeighborMask,
   getChunkCenter,
   worldToChunkCoord,
   intersectsFrustumAABB,
 } from '../math/chunk-coord';
+
+class CameraVelocityTracker {
+  private prevX = Infinity;
+  private prevZ = Infinity;
+  private prevT = 0;
+
+  vx = 0;
+  vz = 0;
+  speed = 0;
+
+  private readonly alpha: number;
+
+  constructor(alpha = 0.15) {
+    this.alpha = alpha;
+  }
+
+  update(x: number, z: number, nowMs: number): void {
+    if (this.prevT === 0) {
+      this.prevX = x;
+      this.prevZ = z;
+      this.prevT = nowMs;
+      return;
+    }
+
+    const dtSec = Math.max((nowMs - this.prevT) / 1000, 1e-6);
+    const rawVx = (x - this.prevX) / dtSec;
+    const rawVz = (z - this.prevZ) / dtSec;
+
+    this.vx = this.alpha * rawVx + (1 - this.alpha) * this.vx;
+    this.vz = this.alpha * rawVz + (1 - this.alpha) * this.vz;
+    this.speed = Math.sqrt(this.vx * this.vx + this.vz * this.vz);
+
+    this.prevX = x;
+    this.prevZ = z;
+    this.prevT = nowMs;
+  }
+
+  reset(): void {
+    this.prevX = Infinity;
+    this.prevZ = Infinity;
+    this.prevT = 0;
+    this.vx = 0;
+    this.vz = 0;
+    this.speed = 0;
+  }
+}
+
+class AnticipationRingBuffer {
+  private readonly slots: (StreamingRequest | null)[];
+  private readonly capacity: number;
+  private head = 0; // next read index
+  private tail = 0; // next write index
+  private _size = 0;
+
+  constructor(capacity: number) {
+    this.capacity = capacity;
+    // Pre-allocate all slots to avoid GC pressure at runtime
+    this.slots = new Array<StreamingRequest | null>(capacity).fill(null);
+  }
+
+  get size(): number {
+    return this._size;
+  }
+
+  enqueue(req: StreamingRequest): void {
+    if (this._size < this.capacity) {
+      this.slots[this.tail] = req;
+      this.tail = (this.tail + 1) % this.capacity;
+      this._size++;
+    } else {
+      // Buffer full: find the worst resident
+      let worstIdx = -1;
+      let worstScore = -Infinity;
+      for (let i = 0; i < this.capacity; i++) {
+        const s = this.slots[i];
+        if (s !== null && s.score > worstScore) {
+          worstScore = s.score;
+          worstIdx = i;
+        }
+      }
+      // Only replace if the new request is strictly better
+      if (worstIdx >= 0 && req.score < worstScore) {
+        this.slots[worstIdx] = req;
+      }
+    }
+  }
+
+  dequeue(): StreamingRequest | null {
+    if (this._size === 0) return null;
+
+    let bestIdx = -1;
+    let bestScore = Infinity;
+    for (let i = 0; i < this.capacity; i++) {
+      const s = this.slots[i];
+      if (s !== null && s.score < bestScore) {
+        bestScore = s.score;
+        bestIdx = i;
+      }
+    }
+
+    if (bestIdx < 0) return null;
+
+    const req = this.slots[bestIdx]!;
+    this.slots[bestIdx] = null;
+    this._size--;
+    return req;
+  }
+
+  has(key: ChunkKey): boolean {
+    for (let i = 0; i < this.capacity; i++) {
+      const s = this.slots[i];
+      if (s !== null && getChunkKey(s.coord) === key) return true;
+    }
+    return false;
+  }
+
+  remove(key: ChunkKey): void {
+    for (let i = 0; i < this.capacity; i++) {
+      const s = this.slots[i];
+      if (s !== null && getChunkKey(s.coord) === key) {
+        this.slots[i] = null;
+        this._size--;
+        return;
+      }
+    }
+  }
+
+  reprioritize(
+    camX: number,
+    camZ: number,
+    vx: number,
+    vz: number,
+    speed: number,
+    anticipationFrames: number,
+    velocityWeight: number,
+  ): void {
+    const invSpeed = speed > 1e-3 ? 1 / speed : 0;
+    const normVx = vx * invSpeed;
+    const normVz = vz * invSpeed;
+
+    for (let i = 0; i < this.capacity; i++) {
+      const s = this.slots[i];
+      if (s === null) continue;
+
+      const chunkCenterX = s.coord.x * (s as any)._chunkSize + (s as any)._chunkSize / 2;
+      const chunkCenterZ = s.coord.z * (s as any)._chunkSize + (s as any)._chunkSize / 2;
+
+      const dx = chunkCenterX - camX;
+      const dz = chunkCenterZ - camZ;
+      const dist = Math.sqrt(dx * dx + dz * dz) || 1;
+
+      const dotVD = normVx * (dx / dist) + normVz * (dz / dist);
+
+      const anticipationGain = dotVD * speed * anticipationFrames * velocityWeight;
+
+      s.score = dist - anticipationGain;
+    }
+  }
+
+  reprioritizeWithSize(
+    camX: number,
+    camZ: number,
+    vx: number,
+    vz: number,
+    speed: number,
+    anticipationFrames: number,
+    velocityWeight: number,
+    chunkSize: number,
+  ): void {
+    const invSpeed = speed > 1e-3 ? 1 / speed : 0;
+    const normVx = vx * invSpeed;
+    const normVz = vz * invSpeed;
+
+    for (let i = 0; i < this.capacity; i++) {
+      const s = this.slots[i];
+      if (s === null) continue;
+
+      const chunkCenterX = s.coord.x * chunkSize + chunkSize / 2;
+      const chunkCenterZ = s.coord.z * chunkSize + chunkSize / 2;
+
+      const dx = chunkCenterX - camX;
+      const dz = chunkCenterZ - camZ;
+      const dist = Math.sqrt(dx * dx + dz * dz) || 1;
+
+      const dotVD = normVx * (dx / dist) + normVz * (dz / dist);
+      const anticipationGain = dotVD * speed * anticipationFrames * velocityWeight;
+
+      s.score = dist - anticipationGain;
+    }
+  }
+
+  avgAnticipationGain(camX: number, camZ: number, chunkSize: number): number {
+    if (this._size === 0) return 0;
+    let totalGain = 0;
+    let count = 0;
+    for (let i = 0; i < this.capacity; i++) {
+      const s = this.slots[i];
+      if (s === null) continue;
+      const rawDist = s.distanceAtEnqueue;
+      if (rawDist > 0) {
+        totalGain += rawDist - s.score;
+        count++;
+      }
+    }
+    return count > 0 ? totalGain / count : 0;
+  }
+
+  clear(): void {
+    this.slots.fill(null);
+    this.head = 0;
+    this.tail = 0;
+    this._size = 0;
+  }
+}
+
+class ConcurrencyPool {
+  private readonly slots = new Map<ChunkKey, ConcurrencySlot>();
+  private readonly maxSlots: number;
+  private readonly timeoutMs: number;
+
+  constructor(maxSlots: number, timeoutMs: number) {
+    this.maxSlots = maxSlots;
+    this.timeoutMs = timeoutMs;
+  }
+
+  get size(): number {
+    return this.slots.size;
+  }
+
+  canAccept(): boolean {
+    return this.slots.size < this.maxSlots;
+  }
+
+  has(key: ChunkKey): boolean {
+    return this.slots.has(key);
+  }
+
+  submit(key: ChunkKey, genFn: () => Promise<void>): boolean {
+    if (!this.canAccept() || this.slots.has(key)) return false;
+
+    const slot: ConcurrencySlot = {
+      promise: Promise.resolve(), // placeholder replaced below
+      startedAt: performance.now(),
+      settled: false,
+    };
+
+    // Override the promise with real work + settled flag
+    const promise = genFn().finally(() => {
+      slot.settled = true;
+    });
+
+    (slot as any).promise = promise;
+    this.slots.set(key, slot);
+    return true;
+  }
+
+  tick(now: number): void {
+    for (const [key, slot] of this.slots) {
+      if (slot.settled || now - slot.startedAt > this.timeoutMs) {
+        this.slots.delete(key);
+        if (!slot.settled) {
+          console.warn(`[ChunkManager] Slot timeout for chunk ${key} after ${this.timeoutMs}ms`);
+        }
+      }
+    }
+  }
+
+  activeKeys(): IterableIterator<ChunkKey> {
+    return this.slots.keys();
+  }
+
+  clear(): void {
+    this.slots.clear();
+  }
+}
 
 export class ChunkManager {
   private readonly config: TerrainConfig;
@@ -44,10 +320,15 @@ export class ChunkManager {
     memoryGPU: 0,
   });
 
-  private pendingQueue: Array<{ coord: ChunkCoord; priority: number; attempts: number }> = [];
-  private generatingChunks = new Set<ChunkKey>();
+  private readonly velocityTracker = new CameraVelocityTracker(0.15);
+  private readonly ringBuffer: AnticipationRingBuffer;
+  private readonly concurrencyPool: ConcurrencyPool;
 
   private lastCameraPos = { x: Infinity, z: Infinity };
+  private lastVelocityX = 0;
+  private lastVelocityZ = 0;
+  private readonly VELOCITY_CHANGE_THRESHOLD = 5; // world-units/s
+
   private cachedDesiredChunks: ChunkCoord[] = [];
   private readonly CACHE_THRESHOLD = 0.1;
 
@@ -58,38 +339,72 @@ export class ChunkManager {
   constructor(config: TerrainConfig, gpuGenerator: GPUGenerator) {
     this.config = config;
     this.gpuGenerator = gpuGenerator;
+    this.ringBuffer = new AnticipationRingBuffer(config.RING_BUFFER_CAPACITY);
+    this.concurrencyPool = new ConcurrencyPool(
+      config.MAX_CONCURRENT_GENERATIONS,
+      config.GENERATION_TIMEOUT_MS,
+    );
   }
 
   update(camera: CameraState, frustum: FrustumPlanes): void {
-    const startTime = performance.now();
+    const frameStart = performance.now();
+
     this.currentCamera = camera;
     this.currentFrustum = frustum;
 
+    this.velocityTracker.update(camera.position.x, camera.position.z, frameStart);
+
+    this.concurrencyPool.tick(frameStart);
+
     const camChunkCoord = worldToChunkCoord(camera.position, this.config.CHUNK_SIZE, 0 as ChunkLOD);
     this.cameraChunk.set(camChunkCoord);
-
     const desiredChunks = this.getDesiredChunksCached(camera);
-    const currentChunks = this.activeChunks();
 
     const desiredSpatialCoords = new Map<string, number>();
     for (const c of desiredChunks) {
       desiredSpatialCoords.set(`${c.x}:${c.z}`, c.lod);
     }
-
     const desiredKeys = new Set(desiredChunks.map((c) => getChunkKey(c)));
 
-    this.cullChunks(currentChunks, desiredKeys, desiredSpatialCoords);
-    this.queueNewChunks(desiredChunks, currentChunks);
-    this.processGenerationQueue();
+    const mutations = this.collectCullMutations(
+      this.activeChunks(),
+      desiredKeys,
+      desiredSpatialCoords,
+    );
 
-    this.updateVisibilityFast(currentChunks, frustum);
+    this.enqueueNewChunks(desiredChunks, this.activeChunks());
+
+    const velChanged =
+      Math.abs(this.velocityTracker.vx - this.lastVelocityX) > this.VELOCITY_CHANGE_THRESHOLD ||
+      Math.abs(this.velocityTracker.vz - this.lastVelocityZ) > this.VELOCITY_CHANGE_THRESHOLD;
+
+    if (velChanged || this.ringBuffer.size > 0) {
+      this.ringBuffer.reprioritizeWithSize(
+        camera.position.x,
+        camera.position.z,
+        this.velocityTracker.vx,
+        this.velocityTracker.vz,
+        this.velocityTracker.speed,
+        this.config.ANTICIPATION_FRAMES,
+        this.config.VELOCITY_WEIGHT,
+        this.config.CHUNK_SIZE,
+      );
+      this.lastVelocityX = this.velocityTracker.vx;
+      this.lastVelocityZ = this.velocityTracker.vz;
+    }
+
+    this.drainRingBuffer(mutations.chunksAfterCull);
+
+    this.applyMutations(mutations);
+
+    this.updateVisibilityFast(this.activeChunks(), frustum);
 
     if (this.needsNeighborUpdate) {
-      this.updateNeighborMasks(currentChunks);
+      this.updateNeighborMasks(this.activeChunks());
       this.needsNeighborUpdate = false;
     }
 
-    const frameTime = performance.now() - startTime;
+    const frameTime = performance.now() - frameStart;
     this.perfStats.update((stats) => ({
       ...stats,
       timestamp: performance.now(),
@@ -120,6 +435,7 @@ export class ChunkManager {
     const maxDist = Math.max(...this.config.LOD_DISTANCES) * 1.2;
     const radius = Math.ceil(maxDist / this.config.CHUNK_SIZE);
 
+    // Spiral outward from camera to naturally order by proximity
     let x = 0,
       z = 0,
       dx = 0,
@@ -130,7 +446,6 @@ export class ChunkManager {
       if (-radius <= x && x <= radius && -radius <= z && z <= radius) {
         const chunkX = centerX + x;
         const chunkZ = centerZ + z;
-
         const center = getChunkCenter({ x: chunkX, z: chunkZ, lod: 0 }, this.config.CHUNK_SIZE);
         const dist = distanceToChunk(camera.position, center);
 
@@ -150,139 +465,164 @@ export class ChunkManager {
     return desired;
   }
 
-  private cullChunks(
+  private collectCullMutations(
     currentChunks: Map<ChunkKey, Chunk>,
     desiredKeys: Set<ChunkKey>,
     desiredSpatialCoords: Map<string, number>,
-  ): void {
-    const toUnload: ChunkKey[] = [];
+  ): { chunksAfterCull: Map<ChunkKey, Chunk>; keysToRelease: ChunkKey[]; hasChanges: boolean } {
+    const working = new Map(currentChunks);
+    const keysToRelease: ChunkKey[] = [];
     let hasChanges = false;
+    const now = performance.now();
 
-    for (const [key, chunk] of currentChunks) {
-      if (!desiredKeys.has(key)) {
-        const spatialKey = `${chunk.meta.coord.x}:${chunk.meta.coord.z}`;
-        const desiredLOD = desiredSpatialCoords.get(spatialKey);
+    for (const [key, chunk] of working) {
+      if (desiredKeys.has(key)) continue;
 
-        if (desiredLOD !== undefined) {
-          const replacementKey = `${chunk.meta.coord.x}:${chunk.meta.coord.z}:${desiredLOD}`;
-          const replacement = currentChunks.get(replacementKey as ChunkKey);
+      const spatialKey = `${chunk.meta.coord.x}:${chunk.meta.coord.z}`;
+      const desiredLOD = desiredSpatialCoords.get(spatialKey);
 
-          if (!replacement || replacement.state !== 'ready') {
-            const updated: Chunk = {
-              ...chunk,
-              metrics: { ...chunk.metrics, lastAccessed: performance.now() },
-            };
-            currentChunks.set(key, updated);
-            continue;
-          }
-        }
-
-        if (chunk.state === 'error') {
-          if (chunk.metrics.frameCount > 60) {
-            this.pendingQueue.push({
-              coord: chunk.meta.coord,
-              priority: 0,
-              attempts: chunk.metrics.frameCount,
-            });
-          }
+      if (desiredLOD !== undefined) {
+        const replacementKey =
+          `${chunk.meta.coord.x}:${chunk.meta.coord.z}:${desiredLOD}` as ChunkKey;
+        const replacement = working.get(replacementKey);
+        if (!replacement || replacement.state !== 'ready') {
+          working.set(key, {
+            ...chunk,
+            metrics: { ...chunk.metrics, lastAccessed: now },
+          });
           continue;
         }
+      }
 
-        if (chunk.state === 'unloading') {
-          const framesPassed = (performance.now() - chunk.metrics.lastAccessed) / 16;
-          if (framesPassed > this.config.UNLOAD_DELAY_FRAMES) {
-            toUnload.push(key);
-          }
-        } else {
-          const updated: Chunk = {
-            ...chunk,
-            state: 'unloading',
-            metrics: {
-              ...chunk.metrics,
-              lastAccessed: performance.now(),
-            },
-          };
-          currentChunks.set(key, updated);
-          hasChanges = true;
+      if (chunk.state === 'error') {
+        if (chunk.metrics.frameCount > 60) {
+          this.ringBuffer.enqueue({
+            coord: chunk.meta.coord,
+            score: 0,
+            distanceAtEnqueue: 0,
+            enqueuedAt: now,
+            attempts: chunk.metrics.frameCount,
+          });
         }
+        continue;
+      }
+
+      if (chunk.state === 'unloading') {
+        const framesPassed = (now - chunk.metrics.lastAccessed) / 16;
+        if (framesPassed > this.config.UNLOAD_DELAY_FRAMES) {
+          keysToRelease.push(key);
+        }
+      } else {
+        working.set(key, {
+          ...chunk,
+          state: 'unloading',
+          metrics: { ...chunk.metrics, lastAccessed: now },
+        });
+        hasChanges = true;
       }
     }
 
-    if (currentChunks.size > this.config.MAX_CHUNKS) {
-      const candidates = Array.from(currentChunks.entries())
-        .filter(([k, c]) => c.state === 'unloading')
+    // Evict excess if over MAX_CHUNKS
+    if (working.size > this.config.MAX_CHUNKS) {
+      const candidates = Array.from(working.entries())
+        .filter(([, c]) => c.state === 'unloading')
         .sort((a, b) => a[1].metrics.lastAccessed - b[1].metrics.lastAccessed);
 
       while (
-        currentChunks.size - toUnload.length > this.config.MAX_CHUNKS &&
+        working.size - keysToRelease.length > this.config.MAX_CHUNKS &&
         candidates.length > 0
       ) {
         const [key] = candidates.shift()!;
-        if (!toUnload.includes(key)) toUnload.push(key);
+        if (!keysToRelease.includes(key)) keysToRelease.push(key);
       }
     }
 
-    if (toUnload.length > 0 || hasChanges) {
-      this.activeChunks.set(new Map(currentChunks));
+    return { chunksAfterCull: working, keysToRelease, hasChanges };
+  }
 
-      for (const key of toUnload) {
-        const chunk = currentChunks.get(key);
-        if (chunk?.gpu) {
-          this.gpuGenerator.releaseResources(chunk.gpu);
-        }
-        currentChunks.delete(key);
-      }
+  private enqueueNewChunks(desired: ChunkCoord[], currentChunks: Map<ChunkKey, Chunk>): void {
+    const now = performance.now();
 
-      if (toUnload.length > 0) {
-        this.activeChunks.set(new Map(currentChunks));
+    for (const coord of desired) {
+      const key = getChunkKey(coord);
+      if (currentChunks.has(key)) continue;
+      if (this.concurrencyPool.has(key)) continue;
+      if (this.ringBuffer.has(key)) continue;
+
+      const center = getChunkCenter(coord, this.config.CHUNK_SIZE);
+      const dist = this.currentCamera
+        ? distanceToChunk(this.currentCamera.position, center)
+        : Infinity;
+
+      this.ringBuffer.enqueue({
+        coord,
+        score: dist,
+        distanceAtEnqueue: dist,
+        enqueuedAt: now,
+        attempts: 0,
+      });
+    }
+  }
+
+  private drainRingBuffer(chunksAfterCull: Map<ChunkKey, Chunk>): void {
+    const freeSlots = this.config.MAX_CONCURRENT_GENERATIONS - this.concurrencyPool.size;
+    const budget = Math.min(freeSlots, this.config.GENERATION_BUDGET);
+
+    let submitted = 0;
+    while (this.ringBuffer.size > 0 && submitted < budget) {
+      const req = this.ringBuffer.dequeue();
+      if (!req) break;
+
+      const key = getChunkKey(req.coord);
+
+      // Skip if already active or generating
+      if (chunksAfterCull.has(key)) continue;
+      if (this.concurrencyPool.has(key)) continue;
+
+      // Submit to pool — this starts the async GPU work
+      const accepted = this.concurrencyPool.submit(key, () =>
+        this.generateChunk(req.coord, req.attempts),
+      );
+
+      if (accepted) {
+        // Immediately register chunk in the working map as 'generating'
+        // so the scene graph doesn't get a gap
+        chunksAfterCull.set(key, this.buildPendingChunk(req.coord, req.attempts));
+        submitted++;
         this.needsNeighborUpdate = true;
       }
     }
   }
 
-  private queueNewChunks(desired: ChunkCoord[], currentChunks: Map<ChunkKey, Chunk>): void {
-    for (const coord of desired) {
-      const key = getChunkKey(coord);
+  private applyMutations(mutations: {
+    chunksAfterCull: Map<ChunkKey, Chunk>;
+    keysToRelease: ChunkKey[];
+    hasChanges: boolean;
+  }): void {
+    const { chunksAfterCull, keysToRelease, hasChanges } = mutations;
+    const hadReleases = keysToRelease.length > 0;
 
-      if (currentChunks.has(key)) continue;
-      if (this.generatingChunks.has(key)) continue;
-
-      const center = getChunkCenter(coord, this.config.CHUNK_SIZE);
-      const priority = this.currentCamera
-        ? distanceToChunk(this.currentCamera.position, center)
-        : Infinity;
-
-      this.pendingQueue.push({ coord, priority, attempts: 0 });
+    // Release GPU resources for evicted chunks
+    for (const key of keysToRelease) {
+      const chunk = chunksAfterCull.get(key);
+      if (chunk?.gpu) {
+        this.gpuGenerator.releaseResources(chunk.gpu);
+      }
+      chunksAfterCull.delete(key);
     }
 
-    this.pendingQueue.sort((a, b) => a.priority - b.priority);
-
-    if (this.pendingQueue.length > this.config.PENDING_QUEUE_MAX) {
-      this.pendingQueue = this.pendingQueue.slice(0, this.config.PENDING_QUEUE_MAX);
-    }
-  }
-
-  private processGenerationQueue(): void {
-    const budget = this.config.GENERATION_BUDGET;
-    let processed = 0;
-
-    while (this.pendingQueue.length > 0 && processed < budget) {
-      const request = this.pendingQueue.shift()!;
-      const key = getChunkKey(request.coord);
-
-      if (this.activeChunks().has(key)) continue;
-
-      this.generateChunk(request.coord, request.attempts);
-      processed++;
+    if (hasChanges || hadReleases) {
+      // Single atomic signal update
+      this.activeChunks.set(new Map(chunksAfterCull));
+      if (hadReleases) {
+        this.needsNeighborUpdate = true;
+      }
     }
   }
 
-  private async generateChunk(coord: ChunkCoord, attemptCount: number = 0): Promise<void> {
-    const key = getChunkKey(coord);
-    this.generatingChunks.add(key);
-
+  private buildPendingChunk(coord: ChunkCoord, attemptCount: number): Chunk {
     const now = performance.now();
-    const newChunk: Chunk = {
+    return {
       meta: {
         coord,
         worldOrigin: {
@@ -311,17 +651,23 @@ export class ChunkManager {
       },
       mesh: null,
     };
+  }
+
+  private async generateChunk(coord: ChunkCoord, attemptCount = 0): Promise<void> {
+    const key = getChunkKey(coord);
 
     this.activeChunks.update((chunks) => {
-      chunks.set(key, newChunk);
-      return new Map(chunks);
+      if (!chunks.has(key)) {
+        chunks.set(key, this.buildPendingChunk(coord, attemptCount));
+        return new Map(chunks);
+      }
+      return chunks;
     });
-    this.needsNeighborUpdate = true;
 
     try {
-      const startGen = performance.now();
+      const genStart = performance.now();
       const { geometry, bounds, gpuResources } = await this.gpuGenerator.generateChunk(coord);
-      const genTime = performance.now() - startGen;
+      const genTime = performance.now() - genStart;
 
       this.activeChunks.update((chunks) => {
         const chunk = chunks.get(key);
@@ -330,7 +676,7 @@ export class ChunkManager {
         const updated: Chunk = {
           ...chunk,
           state: 'ready',
-          bounds: bounds,
+          bounds,
           gpu: gpuResources,
           geometryData: geometry,
           metrics: {
@@ -347,25 +693,25 @@ export class ChunkManager {
       this.submissionCounter.update((n) => n + 1);
       this.needsNeighborUpdate = true;
     } catch (error) {
-      console.error(`Error generando chunk ${key} (intento ${attemptCount}):`, error);
+      console.error(
+        `[ChunkManager] Error generating chunk ${key} (attempt ${attemptCount}):`,
+        error,
+      );
+
       this.activeChunks.update((chunks) => {
         const chunk = chunks.get(key);
         if (chunk) {
-          const updated: Chunk = {
+          chunks.set(key, {
             ...chunk,
             state: 'error',
-            metrics: {
-              ...chunk.metrics,
-              frameCount: attemptCount + 1,
-            },
-          };
-          chunks.set(key, updated);
+            metrics: { ...chunk.metrics, frameCount: attemptCount + 1 },
+          });
         }
         return new Map(chunks);
       });
-    } finally {
-      this.generatingChunks.delete(key);
     }
+    // Note: the ConcurrencyPool.tick() on the next frame will
+    // release this slot via the settled flag set in submit().
   }
 
   private updateVisibilityFast(chunks: Map<ChunkKey, Chunk>, frustum: FrustumPlanes): void {
@@ -373,19 +719,17 @@ export class ChunkManager {
 
     for (const [key, chunk] of chunks) {
       if (chunk.state !== 'ready' && chunk.state !== 'unloading') continue;
-
-      const visible = intersectsFrustumAABB(chunk.bounds, frustum);
-
-      if (visible) {
+      if (intersectsFrustumAABB(chunk.bounds, frustum)) {
         newVisible.add(key);
       }
     }
 
     const currentVisible = this.visibleKeys();
-    if (
+    const changed =
       newVisible.size !== currentVisible.size ||
-      !Array.from(newVisible).every((k) => currentVisible.has(k))
-    ) {
+      !Array.from(newVisible).every((k) => currentVisible.has(k));
+
+    if (changed) {
       this.visibleKeys.set(newVisible);
     }
   }
@@ -396,83 +740,63 @@ export class ChunkManager {
       chunkMap.set(k, { meta: { coord: v.meta.coord } });
     }
 
+    let changed = false;
     for (const [key, chunk] of chunks) {
       if (chunk.state !== 'ready') continue;
 
       const mask = calculateNeighborMask(chunk.meta.coord, chunkMap as any);
-
       if (mask !== chunk.metrics.neighborMask) {
-        const updated: Chunk = {
+        chunks.set(key, {
           ...chunk,
           metrics: {
             ...chunk.metrics,
             neighborMask: mask,
             lastNeighborUpdate: performance.now(),
           },
-        };
-        chunks.set(key, updated);
+        });
+        changed = true;
       }
     }
 
-    this.activeChunks.set(new Map(chunks));
+    if (changed) {
+      // Only update the signal if something actually changed
+      this.activeChunks.set(new Map(chunks));
+    }
   }
 
   getChunkSystemState(): Signal<ChunkSystemState> {
-    return computed(() => ({
-      activeChunks: this.activeChunks(),
-      visibleKeys: this.visibleKeys(),
-      generatingKeys: new Set(this.generatingChunks),
-      cameraChunk: this.cameraChunk(),
-      submissionCounter: this.submissionCounter(),
-      stats: {
-        totalVRAM: this.calculateTotalVRAM(),
-        visibleCount: this.visibleKeys().size,
-        pendingCount: this.pendingQueue.length,
-        generatingCount: this.generatingChunks.size,
-        readyCount: Array.from(this.activeChunks().values()).filter((c) => c.state === 'ready')
-          .length,
-        fps: 1000 / (this.perfStats().frameTimeMs || 16),
-        gpuWaitTime: this.perfStats().gpuTimeMs,
-      },
-    }));
+    return computed(() => {
+      const bufferSize = this.ringBuffer.size;
+      const bufferCapacity = this.config.RING_BUFFER_CAPACITY;
+
+      return {
+        activeChunks: this.activeChunks(),
+        visibleKeys: this.visibleKeys(),
+        generatingKeys: new Set(this.concurrencyPool.activeKeys()),
+        cameraChunk: this.cameraChunk(),
+        submissionCounter: this.submissionCounter(),
+        stats: {
+          totalVRAM: this.calculateTotalVRAM(),
+          visibleCount: this.visibleKeys().size,
+          pendingCount: bufferSize,
+          generatingCount: this.concurrencyPool.size,
+          readyCount: Array.from(this.activeChunks().values()).filter((c) => c.state === 'ready')
+            .length,
+          fps: 1000 / (this.perfStats().frameTimeMs || 16),
+          gpuWaitTime: this.perfStats().gpuTimeMs,
+          // Streaming metrics
+          streamingBufferUsage: bufferCapacity > 0 ? bufferSize / bufferCapacity : 0,
+          anticipationScore: this.ringBuffer.avgAnticipationGain(
+            this.currentCamera?.position.x ?? 0,
+            this.currentCamera?.position.z ?? 0,
+            this.config.CHUNK_SIZE,
+          ),
+          concurrencySlots: this.concurrencyPool.size,
+        },
+      };
+    });
   }
 
-  private calculateTotalVRAM(): number {
-    let total = 0;
-    for (const chunk of this.activeChunks().values()) {
-      if (chunk.gpu) {
-        const res = chunk.meta.resolution;
-        total += res * res * 4; // Position buffer
-        total += (res - 1) * (res - 1) * 6 * 2; // Index buffer
-      }
-    }
-
-    return total;
-  }
-
-  private estimateBounds(coord: ChunkCoord): ChunkBounds {
-    const originX = coord.x * this.config.CHUNK_SIZE;
-    const originZ = coord.z * this.config.CHUNK_SIZE;
-
-    const maxH = this.config.TERRAIN_HEIGHT_SCALE * 2.0 + this.config.TERRAIN_OFFSET_Y;
-    const minH = this.config.TERRAIN_OFFSET_Y - this.config.TERRAIN_HEIGHT_SCALE * 1.5;
-
-    return {
-      min: { x: originX, y: minH, z: originZ },
-      max: { x: originX + this.config.CHUNK_SIZE, y: maxH, z: originZ + this.config.CHUNK_SIZE },
-      center: {
-        x: originX + this.config.CHUNK_SIZE / 2,
-        y: (minH + maxH) / 2,
-        z: originZ + this.config.CHUNK_SIZE / 2,
-      },
-      radius: Math.sqrt(3 * Math.pow(this.config.CHUNK_SIZE / 2, 2) + Math.pow(maxH - minH, 2) / 2),
-    };
-  }
-
-  /**
-   * Obtains the local interpolated ground height at the X/Z coordinate.
-   * A vital method for synchronous CPU collision grounding without WebGPU iteration.
-   */
   getTerrainHeightAt(x: number, z: number): number | null {
     let targetChunk: Chunk | null = null;
 
@@ -504,7 +828,6 @@ export class ChunkManager {
     const v = (localZ % cellSize) / cellSize;
 
     const { positions } = targetChunk.geometryData;
-
     const idx00 = (gridZ * res + gridX) * 3 + 1;
     const idx10 = (gridZ * res + (gridX + 1)) * 3 + 1;
     const idx01 = ((gridZ + 1) * res + gridX) * 3 + 1;
@@ -515,10 +838,7 @@ export class ChunkManager {
     const h01 = positions[idx01];
     const h11 = positions[idx11];
 
-    const h0 = h00 * (1 - u) + h10 * u;
-    const h1 = h01 * (1 - u) + h11 * u;
-
-    return h0 * (1 - v) + h1 * v;
+    return (h00 * (1 - u) + h10 * u) * (1 - v) + (h01 * (1 - u) + h11 * u) * v;
   }
 
   clearAllChunks(): void {
@@ -529,13 +849,45 @@ export class ChunkManager {
       }
     }
     this.activeChunks.set(new Map());
-    this.pendingQueue = [];
-    this.generatingChunks.clear();
+    this.ringBuffer.clear();
+    this.concurrencyPool.clear();
     this.visibleKeys.set(new Set());
     this.cachedDesiredChunks = [];
+    this.velocityTracker.reset();
   }
 
   dispose(): void {
     this.clearAllChunks();
+  }
+
+  private calculateTotalVRAM(): number {
+    let total = 0;
+    for (const chunk of this.activeChunks().values()) {
+      if (chunk.gpu) {
+        const res = chunk.meta.resolution;
+        total += res * res * 4; // Position buffer (float32 per vertex)
+        total += (res - 1) * (res - 1) * 6 * 2; // Index buffer (uint16)
+      }
+    }
+    return total;
+  }
+
+  private estimateBounds(coord: ChunkCoord): ChunkBounds {
+    const originX = coord.x * this.config.CHUNK_SIZE;
+    const originZ = coord.z * this.config.CHUNK_SIZE;
+
+    const maxH = this.config.TERRAIN_HEIGHT_SCALE * 2.0 + this.config.TERRAIN_OFFSET_Y;
+    const minH = this.config.TERRAIN_OFFSET_Y - this.config.TERRAIN_HEIGHT_SCALE * 1.5;
+
+    return {
+      min: { x: originX, y: minH, z: originZ },
+      max: { x: originX + this.config.CHUNK_SIZE, y: maxH, z: originZ + this.config.CHUNK_SIZE },
+      center: {
+        x: originX + this.config.CHUNK_SIZE / 2,
+        y: (minH + maxH) / 2,
+        z: originZ + this.config.CHUNK_SIZE / 2,
+      },
+      radius: Math.sqrt(3 * Math.pow(this.config.CHUNK_SIZE / 2, 2) + Math.pow(maxH - minH, 2) / 2),
+    };
   }
 }

@@ -42,6 +42,36 @@ export interface TerrainConfig {
   // GPU
   readonly USE_COMPUTE_SHADERS: boolean;
   readonly COMPUTE_WORKGROUP_SIZE: 8 | 16 | 32;
+
+  // Streaming / Buffer de Anticipación
+  /**
+   * Frames into the future used for chunk preloading prediction.
+   * Higher = more aggressive look-ahead, at cost of VRAM.
+   * Range: [10, 120]. Default: 60 (≈1 s at 60 fps).
+   */
+  readonly ANTICIPATION_FRAMES: number;
+  /**
+   * Maximum number of concurrent GPU chunk-generation promises.
+   * Hard cap — additional requests stay in the ring buffer.
+   * Range: [1, 8]. Default: 4.
+   */
+  readonly MAX_CONCURRENT_GENERATIONS: number;
+  /**
+   * Weight of camera velocity direction in the priority score.
+   * 0 = pure distance, 1 = pure look-ahead. Default: 0.6.
+   */
+  readonly VELOCITY_WEIGHT: number;
+  /**
+   * Fixed capacity of the circular anticipation ring buffer.
+   * Requests beyond this limit evict the lowest-priority resident.
+   * Default: 256.
+   */
+  readonly RING_BUFFER_CAPACITY: number;
+  /**
+   * Milliseconds before an in-flight generation slot is force-released.
+   * Prevents GPU hangs from starving the pool. Default: 5000 ms.
+   */
+  readonly GENERATION_TIMEOUT_MS: number;
 }
 
 /**
@@ -208,8 +238,13 @@ export const DEFAULT_TERRAIN_CONFIG: Readonly<TerrainConfig> = {
   FRUSTUM_CULLING_ENABLED: true,
   USE_COMPUTE_SHADERS: true,
   COMPUTE_WORKGROUP_SIZE: 8,
+  // Streaming / Buffer de Anticipación
+  ANTICIPATION_FRAMES: 60,
+  MAX_CONCURRENT_GENERATIONS: 4,
+  VELOCITY_WEIGHT: 0.6,
+  RING_BUFFER_CAPACITY: 256,
+  GENERATION_TIMEOUT_MS: 5000,
 } as const;
-
 
 /**
  * System hard limits for validation

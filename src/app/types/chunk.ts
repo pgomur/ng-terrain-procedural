@@ -164,7 +164,58 @@ export interface ChunkSystemState {
     readonly readyCount: number;
     readonly fps: number;
     readonly gpuWaitTime: number;
+    // Streaming buffer metrics
+    readonly streamingBufferUsage: number; // ringSize / capacity [0..1]
+    readonly anticipationScore: number; // avg predicted gain from velocity
+    readonly concurrencySlots: number; // active GPU generation promises
   };
+}
+
+// Streaming System Types
+
+/**
+ * Enriched generation request stored in the AnticipationRingBuffer.
+ * Contains a pre-computed priority score that accounts for camera velocity
+ * and predicted position, not just raw distance.
+ */
+export interface StreamingRequest {
+  readonly coord: ChunkCoord;
+  /** Lower score = higher priority. Updated by reprioritize(). */
+  score: number;
+  /** Raw world-space distance to camera at enqueue time. */
+  readonly distanceAtEnqueue: number;
+  /** Monotonic timestamp when this request was created. */
+  readonly enqueuedAt: number;
+  /** Number of generation attempts (for retry throttling). */
+  attempts: number;
+}
+
+/**
+ * Active slot in the ConcurrencyPool.
+ * Tracks an in-flight GPU generation promise with a timeout guard.
+ */
+export interface ConcurrencySlot {
+  /** Resolves when generateChunk() completes (success or error). */
+  readonly promise: Promise<void>;
+  /** performance.now() stamp when the slot was reserved. */
+  readonly startedAt: number;
+  /** Whether the underlying async work has settled (set by the closure). */
+  settled: boolean;
+}
+
+/**
+ * Streaming subsystem metrics exported per-frame.
+ * Available on ChunkSystemState.stats for external monitoring.
+ */
+export interface StreamingStats {
+  /** Ring buffer fill ratio [0..1]: ringSize / capacity. */
+  readonly bufferUsage: number;
+  /** Number of concurrency pool slots currently occupied. */
+  readonly activeSlots: number;
+  /** Smoothed camera speed in world-units per second. */
+  readonly cameraSpeed: number;
+  /** Weighted average anticipation gain for queued requests. */
+  readonly avgAnticipationGain: number;
 }
 
 /**
