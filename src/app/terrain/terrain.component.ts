@@ -42,11 +42,11 @@ export class TerrainComponent implements OnInit, AfterViewInit, OnDestroy {
   public isPointerLocked = false;
   private cameraPitch = 0;
   private cameraYaw = 0;
-  private cameraPosition = new THREE.Vector3(0, 300, 500);
-  private movementSpeed = 150.0;
+  private cameraPosition = new THREE.Vector3(0, 100, 500);
+  private movementSpeed = 30.0;
 
   public currentX = 0;
-  public currentY = 300;
+  public currentY = 100;
   public currentZ = 500;
   public currentSpeed = 0;
 
