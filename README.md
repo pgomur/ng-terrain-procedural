@@ -1,5 +1,16 @@
 # Procedural WebGPU Terrain Engine
 
+<p>
+  <img src="https://img.shields.io/badge/Angular-21-DD0031?style=flat&logo=angular&logoColor=white" />
+  <img src="https://img.shields.io/badge/TypeScript-5.9-3178C6?style=flat&logo=typescript&logoColor=white" />
+  <img src="https://img.shields.io/badge/Three.js-0.183-000000?style=flat&logo=three.js&logoColor=white" />
+  <img src="https://img.shields.io/badge/WebGPU-Enabled-00599C?style=flat" />
+  <img src="https://img.shields.io/badge/Vitest-4.0-729B1B?style=flat&logo=vitest&logoColor=white" />
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/License-MIT-8A8A8A?style=flat&logo=github&logoColor=white" />
+  </a>
+</p>
+
 An infinite procedural terrain engine using WebGPU compute shaders, predictive spatial streaming, and memory pooling. Built with a reactive architecture (Angular Signals), it orchestrates asynchronous GPU tasks and spatial data structures without blocking the main thread.
 
 ## Core Architecture & Engine Design
