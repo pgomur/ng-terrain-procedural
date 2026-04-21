@@ -11,6 +11,8 @@
   </a>
 </p>
 
+**[Live Demo](https://pgomur.github.io/ng-terrain-procedural/)**
+
 An infinite procedural terrain engine using WebGPU compute shaders, predictive spatial streaming, and memory pooling. Built with a reactive architecture (Angular Signals), it orchestrates asynchronous GPU tasks and spatial data structures without blocking the main thread.
 
 ## Core Architecture & Engine Design
