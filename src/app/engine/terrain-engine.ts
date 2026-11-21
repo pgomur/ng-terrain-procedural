@@ -1,11 +1,20 @@
 import { Injectable, signal, computed } from '@angular/core';
 import * as THREE from 'three';
 import { WebGPURenderer } from 'three/webgpu';
-import { color, fog, positionView, smoothstep, uniform } from 'three/tsl';
+import {
+  cameraWorldMatrix,
+  fog,
+  normalWorldGeometry,
+  positionView,
+  smoothstep,
+  uniform,
+  vec4,
+} from 'three/tsl';
 
 import { ChunkManager } from './chunk-manager';
 import { GPUGenerator } from './gpu-generator';
 import { SceneGraph, SHADOW_CASTER_LAYER } from './scene-graph';
+import { SKY_HORIZON_COLOR, skyColor } from '../shaders/sky.tsl';
 import {
   TerrainConfig,
   DEFAULT_TERRAIN_CONFIG,
@@ -16,23 +25,48 @@ import { Chunk, FrustumPlanes, WorldPosition } from '../types/chunk';
 
 export interface TerrainEngineStats {
   readonly fps: number;
+  readonly frameMs: number;
+  readonly maxFrameMs: number;
   readonly cpuFrameMs: number;
   readonly chunkUpdateMs: number;
+  readonly drawCalls: number;
+  readonly triangles: number;
+  readonly renderWidth: number;
+  readonly renderHeight: number;
+  readonly pixelRatio: number;
   readonly visibleChunks: number;
+  readonly visibleByLod: readonly number[];
   readonly readyChunks: number;
+  readonly unloadingChunks: number;
   readonly generatedPerSecond: number;
   readonly exactBoundsChunks: number;
   readonly pendingChunks: number;
-  readonly estimatedVRAMBytes: number;
+  readonly queueUsage: number;
+  readonly failedChunks: number;
+  readonly atlasBytes: number;
+  readonly stagingBytes: number;
+  readonly geometryBytes: number;
+  readonly terrainBufferBytes: number;
   readonly cameraX: number;
   readonly cameraY: number;
   readonly cameraZ: number;
+  readonly heightAboveGround: number | null;
+  readonly headingDeg: number;
+  readonly pitchDeg: number;
   readonly cameraSpeed: number;
+  readonly chunkX: number;
+  readonly chunkZ: number;
+  readonly seed: number;
 }
 
 export type FrameCallback = (deltaSeconds: number) => void;
 
 type Mutable<T> = { -readonly [K in keyof T]: T[K] };
+
+interface BufferBackend {
+  has?(resource: object): boolean;
+  get?(resource: object): { readonly buffer?: GPUBuffer } | undefined;
+}
 
 const MAX_FRAME_DELTA_S = 0.1;
 const STATS_INTERVAL_MS = 250;
@@ -110,8 +144,14 @@ export class TerrainEngine {
   private statsWindowStart = -1;
   private statsFrames = 0;
   private statsCpuMs = 0;
+  private statsMaxFrameMs = 0;
+  private statsStreamingMs = 0;
+  private statsDistance = 0;
+  private readonly statsLastPosition = new THREE.Vector3();
+  private lastDrawCalls = 0;
+  private lastTriangles = 0;
+  private readonly statsDirection = new THREE.Vector3();
   private statsStartGenerated = 0;
-  private readonly statsStartPosition = new THREE.Vector3();
 
   async init(canvas: HTMLCanvasElement, customConfig?: Partial<TerrainConfig>): Promise<boolean> {
     if (this.initStateSignal() !== 'uninitialized') {
@@ -189,7 +229,7 @@ export class TerrainEngine {
     this.appliedHeight = Math.max(1, this.observedHeight);
     renderer.setPixelRatio(this.appliedPixelRatio);
     renderer.setSize(this.appliedWidth, this.appliedHeight, false);
-    renderer.setClearColor(0x87ceeb, 1);
+    renderer.setClearColor(SKY_HORIZON_COLOR, 1);
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
@@ -211,9 +251,14 @@ export class TerrainEngine {
     this.fogNear = Math.min(this.config.LOD_DISTANCES[1], this.fogFar * 0.5);
 
     const distance = positionView.length();
+    const viewDirection = cameraWorldMatrix.mul(vec4(positionView, 0.0)).xyz.normalize();
     Object.assign(this.scene, {
+      backgroundNode: skyColor(normalWorldGeometry.normalize(), SUN_DIRECTION, {
+        sunDisk: true,
+        clouds: true,
+      }),
       fogNode: fog(
-        color(0x87ceeb),
+        skyColor(viewDirection, SUN_DIRECTION, { sunDisk: false, clouds: false }),
         smoothstep(uniform(this.fogNear), uniform(this.fogFar), distance),
       ),
     });
@@ -374,6 +419,10 @@ export class TerrainEngine {
   private renderLoop = (time: number): void => {
     if (!this.isRunning) return;
 
+    if (this.lastLoopTime >= 0) {
+      this.statsMaxFrameMs = Math.max(this.statsMaxFrameMs, time - this.lastLoopTime);
+    }
+
     const delta =
       this.lastLoopTime < 0
         ? 0
@@ -387,7 +436,10 @@ export class TerrainEngine {
     this.update();
 
     if (this.renderer && this.scene && this.camera) {
+      this.renderer.info.reset();
       this.renderer.render(this.scene, this.camera);
+      this.lastDrawCalls = this.renderer.info.render.drawCalls;
+      this.lastTriangles = this.renderer.info.render.triangles;
     }
 
     this.recordFrame(time, performance.now() - cpuStart);
@@ -415,6 +467,7 @@ export class TerrainEngine {
 
     this.updateSun();
 
+    const streamingStart = performance.now();
     this.chunkManager.update(this.cameraState!, this.frustumPlanes, viewChanged);
 
     this.sceneGraph.sync(
@@ -424,6 +477,7 @@ export class TerrainEngine {
       this.chunkManager.getVisibilityToggled(),
     );
     this.chunkManager.clearRenderChanges();
+    this.statsStreamingMs += performance.now() - streamingStart;
   }
 
   private refreshCameraState(): void {
@@ -487,15 +541,14 @@ export class TerrainEngine {
 
     if (this.statsWindowStart < 0) {
       this.statsWindowStart = time;
-      this.statsFrames = 0;
-      this.statsCpuMs = 0;
-      this.statsStartPosition.copy(this.camera.position);
-      this.statsStartGenerated = this.gpuGenerator?.generatedCount ?? 0;
+      this.resetStatsWindow();
       return;
     }
 
     this.statsFrames++;
     this.statsCpuMs += cpuMs;
+    this.statsDistance += this.camera.position.distanceTo(this.statsLastPosition);
+    this.statsLastPosition.copy(this.camera.position);
 
     const elapsed = time - this.statsWindowStart;
     if (elapsed < STATS_INTERVAL_MS) return;
@@ -503,9 +556,16 @@ export class TerrainEngine {
     this.publishStats(elapsed);
 
     this.statsWindowStart = time;
+    this.resetStatsWindow();
+  }
+
+  private resetStatsWindow(): void {
     this.statsFrames = 0;
     this.statsCpuMs = 0;
-    this.statsStartPosition.copy(this.camera.position);
+    this.statsMaxFrameMs = 0;
+    this.statsStreamingMs = 0;
+    this.statsDistance = 0;
+    this.statsLastPosition.copy(this.camera!.position);
     this.statsStartGenerated = this.gpuGenerator?.generatedCount ?? 0;
   }
 
@@ -515,23 +575,60 @@ export class TerrainEngine {
     const chunkStats = this.chunkManager.getStats();
     const position = this.camera.position;
 
+    const direction = this.camera.getWorldDirection(this.statsDirection);
+    const heading = THREE.MathUtils.radToDeg(Math.atan2(direction.x, -direction.z));
+    const ground = this.chunkManager.getTerrainHeightAt(position.x, position.z);
+    const atlasBytes = this.gpuGenerator?.getAtlasBytes() ?? 0;
+    const stagingBytes = this.gpuGenerator?.getStagingBytes() ?? 0;
+    const geometryBytes = this.uploadedBytes(this.sceneGraph?.getGpuAttributes() ?? []);
+
     this.statsSignal.set({
       fps: (this.statsFrames * 1000) / elapsedMs,
+      frameMs: this.statsFrames > 0 ? elapsedMs / this.statsFrames : 0,
+      maxFrameMs: this.statsMaxFrameMs,
       cpuFrameMs: this.statsFrames > 0 ? this.statsCpuMs / this.statsFrames : 0,
-      chunkUpdateMs: chunkStats.updateTimeMs,
+      chunkUpdateMs: this.statsFrames > 0 ? this.statsStreamingMs / this.statsFrames : 0,
+      drawCalls: this.lastDrawCalls,
+      triangles: this.lastTriangles,
+      renderWidth: Math.floor(this.appliedWidth * this.appliedPixelRatio),
+      renderHeight: Math.floor(this.appliedHeight * this.appliedPixelRatio),
+      pixelRatio: this.appliedPixelRatio,
       visibleChunks: chunkStats.visibleCount,
+      visibleByLod: chunkStats.visibleByLod,
       readyChunks: chunkStats.readyCount,
+      unloadingChunks: chunkStats.unloadingCount,
       generatedPerSecond:
         (((this.gpuGenerator?.generatedCount ?? 0) - this.statsStartGenerated) * 1000) / elapsedMs,
       exactBoundsChunks: chunkStats.exactBoundsCount,
       pendingChunks: chunkStats.pendingCount,
-      estimatedVRAMBytes:
-        (this.gpuGenerator?.getAllocatedBytes() ?? 0) + (this.sceneGraph?.getGeometryBytes() ?? 0),
+      queueUsage: chunkStats.streamingBufferUsage,
+      failedChunks: chunkStats.errorCount,
+      atlasBytes,
+      stagingBytes,
+      geometryBytes,
+      terrainBufferBytes: atlasBytes + stagingBytes + geometryBytes,
       cameraX: position.x,
       cameraY: position.y,
       cameraZ: position.z,
-      cameraSpeed: position.distanceTo(this.statsStartPosition) / (elapsedMs / 1000),
+      heightAboveGround: ground === null ? null : position.y - ground,
+      headingDeg: (heading + 360) % 360,
+      pitchDeg: THREE.MathUtils.radToDeg(Math.asin(THREE.MathUtils.clamp(direction.y, -1, 1))),
+      cameraSpeed: this.statsDistance / (elapsedMs / 1000),
+      chunkX: Math.floor(position.x / this.config.CHUNK_SIZE),
+      chunkZ: Math.floor(position.z / this.config.CHUNK_SIZE),
+      seed: this.config.NOISE_SEED,
     });
+  }
+
+  private uploadedBytes(attributes: readonly object[]): number {
+    const backend = (this.renderer as unknown as { readonly backend?: BufferBackend } | null)?.backend;
+    if (!backend?.has || !backend.get) return 0;
+
+    let bytes = 0;
+    for (const attribute of attributes) {
+      if (backend.has(attribute)) bytes += backend.get(attribute)?.buffer?.size ?? 0;
+    }
+    return bytes;
   }
 
   setCameraPosition(x: number, y: number, z: number): void {
