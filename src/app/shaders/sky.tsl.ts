@@ -46,7 +46,9 @@ export function skyColor(direction: Node<'vec3'>, sun: Vector3, options: SkyOpti
 
   const sunAmount = max(dot(direction, vec3(sun.x, sun.y, sun.z)), 0.0);
   const glow = pow(sunAmount, 8.0).mul(0.22).add(pow(sunAmount, 96.0).mul(0.55));
-  const haze = pow(sunAmount, 2.0).mul(pow(float(1.0).sub(up), 6.0)).mul(0.18);
+  const haze = pow(sunAmount, 2.0)
+    .mul(pow(float(1.0).sub(up), 6.0))
+    .mul(0.18);
   let result = base.add(color(SUN_GLOW_COLOR).mul(glow.add(haze)));
 
   if (options.sunDisk) {
@@ -57,7 +59,9 @@ export function skyColor(direction: Node<'vec3'>, sun: Vector3, options: SkyOpti
   if (options.clouds) {
     const plane = direction.xz.div(max(y, 0.04)).mul(CLOUD_SCALE).add(CLOUD_WIND.mul(time));
     const density = mx_fractal_noise_float(vec3(plane, time.mul(0.01)), 5, 2.0, 0.5);
-    const coverage = smoothstep(0.02, 0.4, density).mul(smoothstep(0.03, 0.3, up)).mul(0.92);
+    const coverage = smoothstep(0.02, 0.4, density)
+      .mul(smoothstep(0.03, 0.3, up))
+      .mul(0.92);
     const shading = mix(color(CLOUD_SHADE_COLOR), color(CLOUD_LIT_COLOR), smoothstep(-0.1, 0.6, density));
     const cloud = shading.add(color(SUN_GLOW_COLOR).mul(glow.mul(0.6)));
     result = mix(result, cloud, coverage);

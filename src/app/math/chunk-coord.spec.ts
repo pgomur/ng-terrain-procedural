@@ -46,8 +46,7 @@ describe('chunk-coord', () => {
     const heights = Float32Array.from({ length: res * res }, (_, i) => (i * 7919) % 97);
     const code = encodeSeamCode(1, 0, 2, 0);
     for (let iz = 0; iz < res; iz++) {
-      const expected =
-        iz % 2 === 0 ? heights[iz * res] : (heights[(iz - 1) * res] + heights[(iz + 1) * res]) / 2;
+      const expected = iz % 2 === 0 ? heights[iz * res] : (heights[(iz - 1) * res] + heights[(iz + 1) * res]) / 2;
       if (iz !== 0) expect(stitchedHeight(heights, res, 0, iz, code)).toBeCloseTo(expected, 5);
     }
     for (let ix = 1; ix < res - 1; ix++) {
@@ -69,7 +68,10 @@ describe('chunk-coord', () => {
 
     const inside = { normals: Array(6).fill({ x: 0, y: 0, z: 0 }), constants: Array(6).fill(1) };
     expect(intersectsFrustumAABB(b, inside)).toBe(true);
-    const behind = { normals: [{ x: 1, y: 0, z: 0 }, ...Array(5).fill({ x: 0, y: 0, z: 0 })], constants: [-1000, 1, 1, 1, 1, 1] };
+    const behind = {
+      normals: [{ x: 1, y: 0, z: 0 }, ...Array(5).fill({ x: 0, y: 0, z: 0 })],
+      constants: [-1000, 1, 1, 1, 1, 1],
+    };
     expect(intersectsFrustumAABB(b, behind)).toBe(false);
   });
 

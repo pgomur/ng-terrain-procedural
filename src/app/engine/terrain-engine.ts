@@ -1,26 +1,13 @@
 import { Injectable, signal, computed } from '@angular/core';
 import * as THREE from 'three';
 import { WebGPURenderer } from 'three/webgpu';
-import {
-  cameraWorldMatrix,
-  fog,
-  normalWorldGeometry,
-  positionView,
-  smoothstep,
-  uniform,
-  vec4,
-} from 'three/tsl';
+import { cameraWorldMatrix, fog, normalWorldGeometry, positionView, smoothstep, uniform, vec4 } from 'three/tsl';
 
 import { ChunkManager } from './chunk-manager';
 import { GPUGenerator } from './gpu-generator';
 import { SceneGraph, SHADOW_CASTER_LAYER } from './scene-graph';
 import { SKY_HORIZON_COLOR, skyColor } from '../shaders/sky.tsl';
-import {
-  TerrainConfig,
-  DEFAULT_TERRAIN_CONFIG,
-  EngineInitState,
-  CameraState,
-} from '../types/terrain';
+import { TerrainConfig, DEFAULT_TERRAIN_CONFIG, EngineInitState, CameraState } from '../types/terrain';
 import { Chunk, FrustumPlanes, WorldPosition } from '../types/chunk';
 
 export interface TerrainEngineStats {
@@ -284,8 +271,7 @@ export class TerrainEngine {
     this.scene.add(ambient);
 
     const shadowRadius = this.config.LOD_DISTANCES[0];
-    const heightExtent =
-      Math.abs(this.config.TERRAIN_HEIGHT_SCALE) * 2 + Math.abs(this.config.TERRAIN_OFFSET_Y);
+    const heightExtent = Math.abs(this.config.TERRAIN_HEIGHT_SCALE) * 2 + Math.abs(this.config.TERRAIN_OFFSET_Y);
 
     this.sunDistance = shadowRadius + heightExtent;
     this.shadowTexelSize = (shadowRadius * 2) / SHADOW_MAP_SIZE;
@@ -309,8 +295,7 @@ export class TerrainEngine {
     sun.shadow.camera.updateProjectionMatrix();
 
     const elevation = Math.asin(SUN_DIRECTION.y);
-    this.shadowFootprintRadius =
-      shadowRadius / Math.sin(elevation) + heightExtent / Math.tan(elevation);
+    this.shadowFootprintRadius = shadowRadius / Math.sin(elevation) + heightExtent / Math.tan(elevation);
 
     this.scene.add(sun);
     this.scene.add(sun.target);
@@ -376,11 +361,7 @@ export class TerrainEngine {
     if (width <= 0 || height <= 0) return;
 
     const pixelRatio = currentPixelRatio();
-    if (
-      width === this.appliedWidth &&
-      height === this.appliedHeight &&
-      pixelRatio === this.appliedPixelRatio
-    ) {
+    if (width === this.appliedWidth && height === this.appliedHeight && pixelRatio === this.appliedPixelRatio) {
       return;
     }
 
@@ -424,9 +405,7 @@ export class TerrainEngine {
     }
 
     const delta =
-      this.lastLoopTime < 0
-        ? 0
-        : Math.min(Math.max((time - this.lastLoopTime) / 1000, 0), MAX_FRAME_DELTA_S);
+      this.lastLoopTime < 0 ? 0 : Math.min(Math.max((time - this.lastLoopTime) / 1000, 0), MAX_FRAME_DELTA_S);
     this.lastLoopTime = time;
 
     const cpuStart = performance.now();
@@ -520,11 +499,7 @@ export class TerrainEngine {
   private refreshFrustumPlanes(): void {
     const camera = this.camera!;
 
-    this.frustum.setFromProjectionMatrix(
-      this.viewProjection,
-      camera.coordinateSystem,
-      camera.reversedDepth,
-    );
+    this.frustum.setFromProjectionMatrix(this.viewProjection, camera.coordinateSystem, camera.reversedDepth);
 
     for (let i = 0; i < 6; i++) {
       const plane = this.frustum.planes[i];
@@ -597,8 +572,7 @@ export class TerrainEngine {
       visibleByLod: chunkStats.visibleByLod,
       readyChunks: chunkStats.readyCount,
       unloadingChunks: chunkStats.unloadingCount,
-      generatedPerSecond:
-        (((this.gpuGenerator?.generatedCount ?? 0) - this.statsStartGenerated) * 1000) / elapsedMs,
+      generatedPerSecond: (((this.gpuGenerator?.generatedCount ?? 0) - this.statsStartGenerated) * 1000) / elapsedMs,
       exactBoundsChunks: chunkStats.exactBoundsCount,
       pendingChunks: chunkStats.pendingCount,
       queueUsage: chunkStats.streamingBufferUsage,

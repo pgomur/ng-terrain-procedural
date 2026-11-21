@@ -1,12 +1,4 @@
-import type {
-  Chunk,
-  ChunkCoord,
-  ChunkKey,
-  ChunkLOD,
-  WorldPosition,
-  ChunkBounds,
-  FrustumPlanes,
-} from '../types/chunk';
+import type { Chunk, ChunkCoord, ChunkKey, ChunkLOD, WorldPosition, ChunkBounds, FrustumPlanes } from '../types/chunk';
 
 /**
  * Generates the unique string key for a chunk
@@ -41,10 +33,7 @@ export function getChunkCenter(coord: ChunkCoord, chunkSize: number): WorldPosit
 /**
  * Determine the appropriate LOD for a chunk based on distance to camera
  */
-export function selectLODForDistance(
-  distance: number,
-  lodDistances: readonly [number, number, number],
-): ChunkLOD {
+export function selectLODForDistance(distance: number, lodDistances: readonly [number, number, number]): ChunkLOD {
   if (distance <= lodDistances[0]) return 0;
   if (distance <= lodDistances[1]) return 1;
   if (distance <= lodDistances[2]) return 2;
@@ -64,11 +53,7 @@ export function distanceToChunk(cameraPos: WorldPosition, chunkCenter: WorldPosi
  * More stringent test: AABB (Axis-Aligned Bounding Box) vs. Frustum
  * More accurate than a sphere but more expensive
  */
-export function intersectsFrustumAABB(
-  bounds: ChunkBounds,
-  planes: FrustumPlanes,
-  epsilon: number = 8.0,
-): boolean {
+export function intersectsFrustumAABB(bounds: ChunkBounds, planes: FrustumPlanes, epsilon: number = 8.0): boolean {
   for (let i = 0; i < 6; i++) {
     const normal = planes.normals[i];
     const constant = planes.constants[i];

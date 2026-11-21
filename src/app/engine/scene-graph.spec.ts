@@ -30,14 +30,17 @@ interface Entry {
 
 interface Internals {
   readonly entries: Map<string, Entry>;
-  readonly batches: Map<number, {
-    readonly page: { readonly resolution: number };
-    readonly mesh: THREE.InstancedMesh;
-    readonly shadowMesh: THREE.InstancedMesh;
-    readonly shadowGeometry: THREE.BufferGeometry;
-    readonly instanceData: THREE.InstancedBufferAttribute;
-    readonly entries: Set<Entry>;
-  }>;
+  readonly batches: Map<
+    number,
+    {
+      readonly page: { readonly resolution: number };
+      readonly mesh: THREE.InstancedMesh;
+      readonly shadowMesh: THREE.InstancedMesh;
+      readonly shadowGeometry: THREE.BufferGeometry;
+      readonly instanceData: THREE.InstancedBufferAttribute;
+      readonly entries: Set<Entry>;
+    }
+  >;
   readonly shadowRegion: { readonly x: number; readonly z: number; readonly radius: number };
   baseGeometryFor(resolution: number): {
     readonly position: THREE.BufferAttribute;
@@ -99,7 +102,12 @@ async function settle(manager: ChunkManager, graph: SceneGraph, camera: THREE.Pe
     frame(manager, graph, camera);
     await tick();
     const stats = manager.getStats();
-    if (f > 5 && stats.pendingCount === 0 && stats.unloadingCount === 0 && stats.exactBoundsCount === stats.readyCount) {
+    if (
+      f > 5 &&
+      stats.pendingCount === 0 &&
+      stats.unloadingCount === 0 &&
+      stats.exactBoundsCount === stats.readyCount
+    ) {
       for (let i = 0; i < 10; i++) {
         frame(manager, graph, camera, false);
         await tick();
@@ -111,7 +119,8 @@ async function settle(manager: ChunkManager, graph: SceneGraph, camera: THREE.Pe
 }
 
 function bruteForceSeam(graph: SceneGraph, entry: Entry): number {
-  const lodAt = (dx: number, dz: number) => internals(graph).entries.get(`${entry.x + dx}:${entry.z + dz}`)?.lod ?? null;
+  const lodAt = (dx: number, dz: number) =>
+    internals(graph).entries.get(`${entry.x + dx}:${entry.z + dz}`)?.lod ?? null;
   return encodeSeamCode(
     seamLodDiff(entry.lod, lodAt(-1, 0)),
     seamLodDiff(entry.lod, lodAt(1, 0)),
@@ -140,7 +149,13 @@ describe('SceneGraph', () => {
       for (let v = 0; v < base.heightIndex.count; v++) {
         const index = base.heightIndex.array[v];
         positions[v * 3] = base.position.array[v * 3] + entry.x * config.CHUNK_SIZE;
-        positions[v * 3 + 1] = stitchedHeight(heights, resolution, index % resolution, Math.floor(index / resolution), entry.seamCode);
+        positions[v * 3 + 1] = stitchedHeight(
+          heights,
+          resolution,
+          index % resolution,
+          Math.floor(index / resolution),
+          entry.seamCode,
+        );
         positions[v * 3 + 2] = base.position.array[v * 3 + 2] + entry.z * config.CHUNK_SIZE;
       }
       const geometry = new THREE.BufferGeometry();
@@ -156,9 +171,10 @@ describe('SceneGraph', () => {
     let samples = 0;
     const points: [number, number][] = [];
     let s = 5;
-    const rnd = () => ((s = (s * 1664525 + 1013904223) >>> 0) / 2 ** 32);
+    const rnd = () => (s = (s * 1664525 + 1013904223) >>> 0) / 2 ** 32;
     for (let i = 0; i < 600; i++) points.push([-64 + rnd() * 191.99, -64 + rnd() * 191.99]);
-    for (let k = 0; k <= 64; k += 3) points.push([0.0001, k], [63.9999, k], [k, 63.9999], [k, 0.0001], [-63.9999 + k, 64.0001]);
+    for (let k = 0; k <= 64; k += 3)
+      points.push([0.0001, k], [63.9999, k], [k, 63.9999], [k, 0.0001], [-63.9999 + k, 64.0001]);
     for (const [x, z] of points) {
       const height = manager.getTerrainHeightAt(x, z);
       if (height === null) continue;
@@ -186,10 +202,13 @@ describe('SceneGraph', () => {
         expect(batch.mesh.count).toBe(visible.length);
         const data = batch.instanceData.array as Float32Array;
         const rows = new Set<string>();
-        for (let i = 0; i < batch.mesh.count; i++) rows.add(`${data[i * 4]}|${data[i * 4 + 1]}|${data[i * 4 + 2]}|${data[i * 4 + 3]}`);
+        for (let i = 0; i < batch.mesh.count; i++)
+          rows.add(`${data[i * 4]}|${data[i * 4 + 1]}|${data[i * 4 + 2]}|${data[i * 4 + 3]}`);
         for (const e of visible) expect(rows.has(`${e.x * 64}|${e.z * 64}|${e.slot}|${e.seamCode}`)).toBe(true);
       }
-      const coords = new Set([...manager.getChunks().values()].filter((c) => c.gpu).map((c) => `${c.meta.coord.x}:${c.meta.coord.z}`));
+      const coords = new Set(
+        [...manager.getChunks().values()].filter((c) => c.gpu).map((c) => `${c.meta.coord.x}:${c.meta.coord.z}`),
+      );
       expect(entries.length).toBe(coords.size);
       return entries;
     };
@@ -229,7 +248,9 @@ describe('SceneGraph', () => {
       expect(batch.shadowMesh.layers.mask).toBe(1 << SHADOW_CASTER_LAYER);
       expect(batch.shadowMesh.castShadow).toBe(true);
       expect(batch.mesh.castShadow).toBe(false);
-      expect(batch.shadowGeometry.drawRange.count).toBe(internals(graph).baseGeometryFor(batch.page.resolution).surfaceIndexCount);
+      expect(batch.shadowGeometry.drawRange.count).toBe(
+        internals(graph).baseGeometryFor(batch.page.resolution).surfaceIndexCount,
+      );
     }
   }, 30_000);
 

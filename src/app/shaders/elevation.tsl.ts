@@ -167,9 +167,7 @@ export function createHeightKernels(options: HeightKernelOptions) {
     const worldX = job.x.add(u.mul(noise.chunkSize));
     const worldZ = job.y.add(v.mul(noise.chunkSize));
 
-    const noiseP = vec2(worldX, worldZ)
-      .mul(NOISE_FREQUENCY)
-      .add(vec2(noise.seedOffsetX, noise.seedOffsetZ));
+    const noiseP = vec2(worldX, worldZ).mul(NOISE_FREQUENCY).add(vec2(noise.seedOffsetX, noise.seedOffsetZ));
 
     const elevation = float(0.0).toVar();
 
@@ -196,9 +194,7 @@ export function createHeightKernels(options: HeightKernelOptions) {
     heights.element(slot.mul(perChunk).add(local)).assign(elevation);
 
     const bits = uint(floatBitsToUint(elevation));
-    const key = bits.bitXor(
-      select(bits.shiftRight(uint(31)).equal(uint(1)), uint(0xffffffff), uint(0x80000000)),
-    );
+    const key = bits.bitXor(select(bits.shiftRight(uint(31)).equal(uint(1)), uint(0xffffffff), uint(0x80000000)));
 
     atomicMin(bounds.element(slot.mul(2)), key);
     atomicMax(bounds.element(slot.mul(2).add(1)), key);
@@ -269,10 +265,6 @@ export function createTerrainPositionNode(
       stitch(code.shiftRight(int(6)).bitAnd(int(3)), gx, (i) => last.mul(res).add(i));
     });
 
-    return vec3(
-      positionLocal.x.add(data.x),
-      height.add(positionLocal.y.mul(skirtDepth)),
-      positionLocal.z.add(data.y),
-    );
+    return vec3(positionLocal.x.add(data.x), height.add(positionLocal.y.mul(skirtDepth)), positionLocal.z.add(data.y));
   })();
 }

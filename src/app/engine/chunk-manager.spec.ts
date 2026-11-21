@@ -46,7 +46,7 @@ async function runUntilSettled(manager: ChunkManager, camera: never, maxFrames =
 const slotsHeld = (manager: ChunkManager) => [...manager.getChunks().values()].filter((c) => c.gpu).length;
 
 let seed = 42;
-const random = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32);
+const random = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32;
 const request = (x: number, score: number): StreamingRequest => ({
   key: `${x}:0:0` as ChunkKey,
   coord: { x, z: 0, lod: 0 },
@@ -78,7 +78,10 @@ describe('StreamingPriorityQueue', () => {
           const worst = Math.max(...model.values());
           if (r.score < worst) {
             expect(stored).toBe(true);
-            const evicted = [...model.entries()].filter(([, v]) => v === worst).map(([k]) => k).find((k) => !queue.has(k));
+            const evicted = [...model.entries()]
+              .filter(([, v]) => v === worst)
+              .map(([k]) => k)
+              .find((k) => !queue.has(k));
             expect(evicted).toBeDefined();
             model.delete(evicted!);
             model.set(r.key, r.score);
@@ -154,7 +157,12 @@ describe('ChunkManager', () => {
   }, 30_000);
 
   it('ignores bounds and heights that arrive after the chunk was released', async () => {
-    const generator = new CpuHeightGenerator(config, () => 'ok', () => 50, 200);
+    const generator = new CpuHeightGenerator(
+      config,
+      () => 'ok',
+      () => 50,
+      200,
+    );
     const manager = createManager(generator);
     manager.update(cameraAt(0, 0), everything);
     const firstChunks = [...manager.getChunks().values()];
@@ -172,7 +180,11 @@ describe('ChunkManager', () => {
   }, 30_000);
 
   it('requests collision heights around the camera and retries a failed read', async () => {
-    const generator = new CpuHeightGenerator(config, () => 'ok', (x, z) => 10 + x * 0.01 + z * 0.02);
+    const generator = new CpuHeightGenerator(
+      config,
+      () => 'ok',
+      (x, z) => 10 + x * 0.01 + z * 0.02,
+    );
     generator.failHeightsOnce.add('0:0:0' as ChunkKey);
     const manager = createManager(generator);
     await runUntilSettled(manager, cameraAt(10, 10));

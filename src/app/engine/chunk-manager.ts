@@ -260,7 +260,6 @@ function retryDelayMs(attempts: number): number {
   return Math.min(RETRY_BASE_MS * 2 ** Math.max(0, attempts - 1), RETRY_MAX_MS);
 }
 
-
 export interface ChunkManagerStats {
   readonly activeCount: number;
   readonly readyCount: number;
@@ -323,8 +322,7 @@ export class ChunkManager {
 
   constructor(config: TerrainConfig, gpuGenerator: GPUGenerator<Chunk>) {
     this.config = config;
-    this.seamsEnabled =
-      config.SEAM_FITTING_ENABLED && supportsSeamStitching(config.CHUNK_RESOLUTIONS);
+    this.seamsEnabled = config.SEAM_FITTING_ENABLED && supportsSeamStitching(config.CHUNK_RESOLUTIONS);
     this.gpuGenerator = gpuGenerator;
     this.queue = new StreamingPriorityQueue(config.GENERATION_QUEUE_CAPACITY);
     this.gpuGenerator.setListener({
@@ -497,9 +495,7 @@ export class ChunkManager {
       const desiredLOD = this.desiredLODByCoord.get(spatialKeyOf(chunk.meta.coord));
 
       if (desiredLOD !== undefined) {
-        const replacement = this.chunks.get(
-          `${chunk.meta.coord.x}:${chunk.meta.coord.z}:${desiredLOD}` as ChunkKey,
-        );
+        const replacement = this.chunks.get(`${chunk.meta.coord.x}:${chunk.meta.coord.z}:${desiredLOD}` as ChunkKey);
         if (!replacement || replacement.state !== 'ready') {
           chunk.metrics.lastAccessed = now;
           continue;
@@ -563,12 +559,7 @@ export class ChunkManager {
     this.chunksChanged = true;
   }
 
-  private createRequest(
-    coord: ChunkCoord,
-    key: ChunkKey,
-    attempts: number,
-    now: number,
-  ): StreamingRequest {
+  private createRequest(coord: ChunkCoord, key: ChunkKey, attempts: number, now: number): StreamingRequest {
     let dist = Infinity;
     if (this.hasCamera) {
       const half = this.config.CHUNK_SIZE / 2;
@@ -616,10 +607,7 @@ export class ChunkManager {
         this.markRenderChange(chunk);
       } catch (error) {
         const attempts = req.attempts + 1;
-        console.error(
-          `[ChunkManager] Error generating chunk ${req.key} (attempt ${attempts}):`,
-          error,
-        );
+        console.error(`[ChunkManager] Error generating chunk ${req.key} (attempt ${attempts}):`, error);
         chunk.state = 'error';
         chunk.failure = { attempts, retryAt: now + retryDelayMs(attempts) };
       }

@@ -245,16 +245,10 @@ export class GPUGenerator<TOwner = unknown> {
     const verticesPerChunk = resolution * resolution;
     const estimate = this.estimatePageCapacity(resolution);
     const requested =
-      list.length === 0
-        ? estimate
-        : Math.max(MIN_PAGE_SLOTS, Math.ceil(estimate * GROWTH_PAGE_FRACTION));
+      list.length === 0 ? estimate : Math.max(MIN_PAGE_SLOTS, Math.ceil(estimate * GROWTH_PAGE_FRACTION));
     const maxBindingBytes =
-      this.backendInternals()?.device?.limits.maxStorageBufferBindingSize ??
-      DEFAULT_MAX_STORAGE_BINDING_BYTES;
-    const capacity = Math.max(
-      1,
-      Math.min(requested, Math.floor(maxBindingBytes / (verticesPerChunk * 4))),
-    );
+      this.backendInternals()?.device?.limits.maxStorageBufferBindingSize ?? DEFAULT_MAX_STORAGE_BINDING_BYTES;
+    const capacity = Math.max(1, Math.min(requested, Math.floor(maxBindingBytes / (verticesPerChunk * 4))));
 
     const heights = new StorageBufferAttribute(new Float32Array(capacity * verticesPerChunk), 1);
     const bounds = new StorageBufferAttribute(new Uint32Array(capacity * 2), 1);

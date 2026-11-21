@@ -72,11 +72,7 @@ export class TerrainComponent implements AfterViewInit, OnDestroy {
     if (this.destroyed) return;
 
     if (success) {
-      this.engine.setCameraPosition(
-        this.cameraPosition.x,
-        this.cameraPosition.y,
-        this.cameraPosition.z,
-      );
+      this.engine.setCameraPosition(this.cameraPosition.x, this.cameraPosition.y, this.cameraPosition.z);
       this.engine.lookAt(0, 0, 0);
       this.syncOrientationFromEngine();
 
@@ -148,9 +144,7 @@ export class TerrainComponent implements AfterViewInit, OnDestroy {
     document.addEventListener('mousemove', onMousemove);
 
     this.cleanupFunctions.push(() => canvas.removeEventListener('click', onClick));
-    this.cleanupFunctions.push(() =>
-      document.removeEventListener('pointerlockchange', onPointerLockChange),
-    );
+    this.cleanupFunctions.push(() => document.removeEventListener('pointerlockchange', onPointerLockChange));
     this.cleanupFunctions.push(() => document.removeEventListener('keydown', onKeydown));
     this.cleanupFunctions.push(() => document.removeEventListener('keyup', onKeyup));
     this.cleanupFunctions.push(() => document.removeEventListener('mousemove', onMousemove));
@@ -159,16 +153,11 @@ export class TerrainComponent implements AfterViewInit, OnDestroy {
   private updateCameraLogic(delta: number): void {
     if (!this.isPointerLocked()) return;
 
-    const moveDistance =
-      this.movementSpeed * delta * (this.activeKeys.has('ShiftLeft') ? SPRINT_MULTIPLIER : 1.0);
+    const moveDistance = this.movementSpeed * delta * (this.activeKeys.has('ShiftLeft') ? SPRINT_MULTIPLIER : 1.0);
 
     const cosPitch = Math.cos(this.cameraPitch);
     this.forward
-      .set(
-        -Math.sin(this.cameraYaw) * cosPitch,
-        -Math.sin(this.cameraPitch),
-        -Math.cos(this.cameraYaw) * cosPitch,
-      )
+      .set(-Math.sin(this.cameraYaw) * cosPitch, -Math.sin(this.cameraPitch), -Math.cos(this.cameraYaw) * cosPitch)
       .normalize();
 
     this.right.set(Math.cos(this.cameraYaw), 0, -Math.sin(this.cameraYaw)).normalize();
@@ -181,10 +170,7 @@ export class TerrainComponent implements AfterViewInit, OnDestroy {
     if (this.activeKeys.has('Space')) this.cameraPosition.y += moveDistance;
     if (this.activeKeys.has('ControlLeft')) this.cameraPosition.y -= moveDistance;
 
-    const terrainHeight = this.engine.getTerrainHeightAt(
-      this.cameraPosition.x,
-      this.cameraPosition.z,
-    );
+    const terrainHeight = this.engine.getTerrainHeightAt(this.cameraPosition.x, this.cameraPosition.z);
 
     if (terrainHeight !== null) {
       const groundY = terrainHeight + EYE_HEIGHT;
@@ -194,11 +180,7 @@ export class TerrainComponent implements AfterViewInit, OnDestroy {
       }
     }
 
-    this.engine.setCameraPosition(
-      this.cameraPosition.x,
-      this.cameraPosition.y,
-      this.cameraPosition.z,
-    );
+    this.engine.setCameraPosition(this.cameraPosition.x, this.cameraPosition.y, this.cameraPosition.z);
 
     this.lookTarget.copy(this.cameraPosition).add(this.forward);
     this.engine.lookAt(this.lookTarget.x, this.lookTarget.y, this.lookTarget.z);

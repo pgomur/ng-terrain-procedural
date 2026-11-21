@@ -1,17 +1,6 @@
 import * as THREE from 'three';
 import { MeshStandardNodeMaterial, type Node } from 'three/webgpu';
-import {
-  vec3,
-  vec4,
-  smoothstep,
-  positionWorld,
-  fract,
-  uniform,
-  mix,
-  fwidth,
-  float,
-  cameraViewMatrix,
-} from 'three/tsl';
+import { vec3, vec4, smoothstep, positionWorld, fract, uniform, mix, fwidth, float, cameraViewMatrix } from 'three/tsl';
 import { Chunk, ChunkKey, ChunkLOD } from '../types/chunk';
 import { TerrainConfig } from '../types/terrain';
 import {
@@ -107,8 +96,7 @@ export class SceneGraph {
     this.config = config;
     this.heightSource = heightSource;
     this.colorNode = this.createColorNode();
-    this.seamsEnabled =
-      config.SEAM_FITTING_ENABLED && supportsSeamStitching(config.CHUNK_RESOLUTIONS);
+    this.seamsEnabled = config.SEAM_FITTING_ENABLED && supportsSeamStitching(config.CHUNK_RESOLUTIONS);
     this.skirtDepth = skirtDepthFor(config.TERRAIN_HEIGHT_SCALE);
   }
 
@@ -437,11 +425,7 @@ export class SceneGraph {
     geometry.setAttribute('instanceData', instanceData);
 
     const materials = this.materialsFor(page);
-    const mesh = new THREE.InstancedMesh(
-      geometry,
-      [materials.surface, materials.skirt],
-      page.capacity,
-    );
+    const mesh = new THREE.InstancedMesh(geometry, [materials.surface, materials.skirt], page.capacity);
     mesh.count = 0;
     mesh.visible = false;
     mesh.frustumCulled = false;
