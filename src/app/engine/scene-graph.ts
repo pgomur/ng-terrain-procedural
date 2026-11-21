@@ -1,52 +1,55 @@
 import * as THREE from 'three';
-import { vec3, smoothstep, positionWorld, fract, uniform, mix, fwidth, float } from 'three/tsl';
+import { MeshStandardNodeMaterial, type Node } from 'three/webgpu';
+import { vec3, vec4, smoothstep, positionWorld, fract, uniform, mix, fwidth, float } from 'three/tsl';
 import { Chunk, ChunkKey, ChunkLOD } from '../types/chunk';
 import { TerrainConfig } from '../types/terrain';
-import { getChunkKey, isRenderableChunk } from '../math/chunk-coord';
+import { getChunkKey, isRenderableChunk, analyticHeightRange } from '../math/chunk-coord';
+import { createHeightDisplacementNode } from '../shaders/elevation.tsl';
+import type { HeightPage } from './gpu-generator';
+
+export interface HeightPageSource {
+  getPage(pageId: number): HeightPage | undefined;
+}
 
 interface CoordEntry {
   readonly chunkKey: ChunkKey;
   readonly mesh: THREE.Mesh;
   readonly resolution: number;
-  readonly source: Float32Array;
+  readonly pageId: number;
+  readonly slot: number;
+  readonly generation: number;
 }
 
-const MAX_POOLED_MESHES_PER_RESOLUTION = 32;
+const MAX_POOLED_MESHES = 256;
 const LODS: readonly ChunkLOD[] = [0, 1, 2, 3];
 
 export class SceneGraph {
   private readonly scene: THREE.Scene;
   private readonly config: TerrainConfig;
+  private readonly heightSource: HeightPageSource;
 
   private readonly entries = new Map<string, CoordEntry>();
-  private readonly meshPool = new Map<number, THREE.Mesh[]>();
-  private terrainMaterial: THREE.MeshStandardMaterial | null = null;
+  private readonly meshPool: THREE.Mesh[] = [];
+  private readonly prewarmMeshes: THREE.Mesh[] = [];
+  private readonly geometries = new Map<number, THREE.BufferGeometry>();
+  private readonly materials = new Map<number, MeshStandardNodeMaterial>();
+  private readonly colorNode: Node<'vec3'>;
+  private readonly slotUniform = uniform(float(0)).onObjectUpdate(({ object }) =>
+    object ? ((object.userData['heightSlot'] as number | undefined) ?? 0) : 0,
+  );
 
-  constructor(scene: THREE.Scene, config: TerrainConfig) {
+  constructor(scene: THREE.Scene, config: TerrainConfig, heightSource: HeightPageSource) {
     this.scene = scene;
     this.config = config;
-    this.initMaterial();
-  }
-
-  private initMaterial(): void {
-    this.terrainMaterial = new THREE.MeshStandardMaterial({
-      color: 0xffffff,
-      roughness: 0.8,
-      metalness: 0.1,
-      flatShading: true,
-      side: THREE.FrontSide,
-    });
-
-    this.setupWebGPUShading();
+    this.heightSource = heightSource;
+    this.colorNode = this.createColorNode();
   }
 
   /**
    * Configure terrain shading natively for WebGPU using TSL.
    * This ensures that changes are visible under WebGPU Denderer.
    */
-  private setupWebGPUShading(): void {
-    if (!this.terrainMaterial) return;
-
+  private createColorNode(): Node<'vec3'> {
     const uMinHeight = uniform(this.config.TERRAIN_OFFSET_Y);
     const uMaxHeight = uniform(this.config.TERRAIN_OFFSET_Y + this.config.TERRAIN_HEIGHT_SCALE);
 
@@ -70,7 +73,7 @@ export class SceneGraph {
 
     const gridFactor = smoothstep(float(0.0), float(1.5), line).oneMinus();
 
-    (this.terrainMaterial as any).colorNode = mix(baseColor, baseColor.mul(0.75), gridFactor);
+    return mix(baseColor, baseColor.mul(0.75), gridFactor);
   }
 
   sync(
@@ -91,23 +94,33 @@ export class SceneGraph {
     }
   }
 
+  prewarm(pages: readonly HeightPage[]): void {
+    for (const page of pages) {
+      const mesh = new THREE.Mesh(this.geometryFor(page.resolution), this.materialFor(page.id));
+      mesh.userData['heightSlot'] = 0;
+      mesh.frustumCulled = false;
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      this.prewarmMeshes.push(mesh);
+      this.scene.add(mesh);
+    }
+  }
+
+  endPrewarm(): void {
+    for (const mesh of this.prewarmMeshes) this.scene.remove(mesh);
+    this.prewarmMeshes.length = 0;
+  }
+
   get meshCount(): number {
     return this.entries.size;
   }
 
   getGeometryBytes(): number {
     let bytes = 0;
-    for (const entry of this.entries.values()) {
-      bytes += this.geometryBytes(entry.resolution);
-    }
-    for (const [resolution, pool] of this.meshPool) {
-      bytes += this.geometryBytes(resolution) * pool.length;
+    for (const resolution of this.geometries.keys()) {
+      bytes += resolution * resolution * 12 + (resolution - 1) * (resolution - 1) * 6 * 2;
     }
     return bytes;
-  }
-
-  private geometryBytes(resolution: number): number {
-    return resolution * resolution * 12 + (resolution - 1) * (resolution - 1) * 6 * 2;
   }
 
   private syncCoord(
@@ -118,37 +131,49 @@ export class SceneGraph {
     const best = this.selectBest(spatialKey, chunks);
     const entry = this.entries.get(spatialKey);
 
-    if (!best || !best.geometryData) {
+    if (!best || !best.gpu) {
       if (entry) this.releaseEntry(spatialKey, entry);
       return;
     }
 
     const chunkKey = getChunkKey(best.meta.coord);
-    const source = best.geometryData.positions;
+    const gpu = best.gpu;
 
-    if (entry && entry.chunkKey === chunkKey && entry.source === source) {
+    if (
+      entry &&
+      entry.chunkKey === chunkKey &&
+      entry.pageId === gpu.pageId &&
+      entry.slot === gpu.slot &&
+      entry.generation === gpu.generation
+    ) {
       entry.mesh.visible = visibleKeys.has(chunkKey);
       return;
     }
 
-    const resolution = best.meta.resolution;
     let mesh: THREE.Mesh;
-
-    if (entry && entry.resolution === resolution) {
+    if (entry) {
       mesh = entry.mesh;
     } else {
-      if (entry) this.releaseEntry(spatialKey, entry);
-      mesh = this.acquireMesh(resolution);
+      mesh = this.acquireMesh();
       this.scene.add(mesh);
     }
 
-    this.writeGeometry(mesh.geometry, best);
+    mesh.geometry = this.geometryFor(gpu.resolution);
+    mesh.material = this.materialFor(gpu.pageId);
+    mesh.userData['heightSlot'] = gpu.slot;
 
     mesh.position.set(best.meta.worldOrigin.x, 0, best.meta.worldOrigin.z);
     mesh.updateMatrix();
     mesh.visible = visibleKeys.has(chunkKey);
 
-    this.entries.set(spatialKey, { chunkKey, mesh, resolution, source });
+    this.entries.set(spatialKey, {
+      chunkKey,
+      mesh,
+      resolution: gpu.resolution,
+      pageId: gpu.pageId,
+      slot: gpu.slot,
+      generation: gpu.generation,
+    });
   }
 
   private selectBest(spatialKey: string, chunks: ReadonlyMap<ChunkKey, Chunk>): Chunk | null {
@@ -163,42 +188,72 @@ export class SceneGraph {
     return best;
   }
 
-  private writeGeometry(geometry: THREE.BufferGeometry, chunk: Chunk): void {
-    const data = chunk.geometryData!;
-    const positions = geometry.attributes['position'] as THREE.BufferAttribute;
-    (positions.array as Float32Array).set(data.positions);
-    positions.needsUpdate = true;
+  private geometryFor(resolution: number): THREE.BufferGeometry {
+    let geometry = this.geometries.get(resolution);
+    if (geometry) return geometry;
 
-    const size = chunk.meta.size;
-    const box = geometry.boundingBox ?? new THREE.Box3();
-    box.min.set(0, data.bounds.minHeight, 0);
-    box.max.set(size, data.bounds.maxHeight, size);
-    geometry.boundingBox = box;
-
-    const sphere = geometry.boundingSphere ?? new THREE.Sphere();
-    box.getBoundingSphere(sphere);
-    geometry.boundingSphere = sphere;
-  }
-
-  private acquireMesh(resolution: number): THREE.Mesh {
-    const pooled = this.meshPool.get(resolution);
-    if (pooled && pooled.length > 0) {
-      return pooled.pop()!;
+    const size = this.config.CHUNK_SIZE;
+    const positions = new Float32Array(resolution * resolution * 3);
+    for (let z = 0; z < resolution; z++) {
+      for (let x = 0; x < resolution; x++) {
+        const i = (z * resolution + x) * 3;
+        positions[i] = (x / (resolution - 1)) * size;
+        positions[i + 1] = 0;
+        positions[i + 2] = (z / (resolution - 1)) * size;
+      }
     }
 
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute(
-      'position',
-      new THREE.BufferAttribute(new Float32Array(resolution * resolution * 3), 3),
-    );
+    geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geometry.setIndex(new THREE.BufferAttribute(this.generateIndices(resolution), 1));
 
-    const mesh = new THREE.Mesh(geometry, this.terrainMaterial || undefined);
+    const range = analyticHeightRange(this.config.TERRAIN_HEIGHT_SCALE, this.config.TERRAIN_OFFSET_Y);
+    geometry.boundingBox = new THREE.Box3(
+      new THREE.Vector3(0, range.min, 0),
+      new THREE.Vector3(size, range.max, size),
+    );
+    geometry.boundingSphere = geometry.boundingBox.getBoundingSphere(new THREE.Sphere());
+
+    this.geometries.set(resolution, geometry);
+    return geometry;
+  }
+
+  private materialFor(pageId: number): MeshStandardNodeMaterial {
+    let material = this.materials.get(pageId);
+    if (material) return material;
+
+    const page = this.heightSource.getPage(pageId);
+    if (!page) {
+      throw new Error(`Height page ${pageId} does not exist`);
+    }
+
+    material = new MeshStandardNodeMaterial({
+      color: 0xffffff,
+      roughness: 0.8,
+      metalness: 0.1,
+      flatShading: true,
+      side: THREE.FrontSide,
+    });
+    material.colorNode = vec4(this.colorNode, 1.0);
+    material.positionNode = createHeightDisplacementNode(
+      page.heights,
+      page.resolution,
+      this.slotUniform,
+    );
+
+    this.materials.set(pageId, material);
+    return material;
+  }
+
+  private acquireMesh(): THREE.Mesh {
+    const pooled = this.meshPool.pop();
+    if (pooled) return pooled;
+
+    const mesh = new THREE.Mesh();
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     mesh.frustumCulled = true;
     mesh.matrixAutoUpdate = false;
-
     return mesh;
   }
 
@@ -206,16 +261,8 @@ export class SceneGraph {
     this.scene.remove(entry.mesh);
     this.entries.delete(spatialKey);
 
-    let pool = this.meshPool.get(entry.resolution);
-    if (!pool) {
-      pool = [];
-      this.meshPool.set(entry.resolution, pool);
-    }
-
-    if (pool.length < MAX_POOLED_MESHES_PER_RESOLUTION) {
-      pool.push(entry.mesh);
-    } else {
-      entry.mesh.geometry.dispose();
+    if (this.meshPool.length < MAX_POOLED_MESHES) {
+      this.meshPool.push(entry.mesh);
     }
   }
 
@@ -240,15 +287,17 @@ export class SceneGraph {
   }
 
   dispose(): void {
+    this.endPrewarm();
     for (const entry of this.entries.values()) {
       this.scene.remove(entry.mesh);
-      entry.mesh.geometry.dispose();
     }
     this.entries.clear();
-    for (const pool of this.meshPool.values()) {
-      for (const mesh of pool) mesh.geometry.dispose();
-    }
-    this.meshPool.clear();
-    if (this.terrainMaterial) this.terrainMaterial.dispose();
+    this.meshPool.length = 0;
+
+    for (const geometry of this.geometries.values()) geometry.dispose();
+    this.geometries.clear();
+
+    for (const material of this.materials.values()) material.dispose();
+    this.materials.clear();
   }
 }

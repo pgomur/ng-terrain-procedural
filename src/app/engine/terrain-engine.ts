@@ -11,7 +11,7 @@ import {
   EngineInitState,
   CameraState,
 } from '../types/terrain';
-import { FrustumPlanes, WorldPosition } from '../types/chunk';
+import { Chunk, FrustumPlanes, WorldPosition } from '../types/chunk';
 
 export interface TerrainEngineStats {
   readonly fps: number;
@@ -19,7 +19,8 @@ export interface TerrainEngineStats {
   readonly chunkUpdateMs: number;
   readonly visibleChunks: number;
   readonly readyChunks: number;
-  readonly generatingChunks: number;
+  readonly generatedPerSecond: number;
+  readonly exactBoundsChunks: number;
   readonly pendingChunks: number;
   readonly estimatedVRAMBytes: number;
   readonly cameraX: number;
@@ -45,7 +46,7 @@ export class TerrainEngine {
   private scene: THREE.Scene | null = null;
   private camera: THREE.PerspectiveCamera | null = null;
 
-  private gpuGenerator: GPUGenerator | null = null;
+  private gpuGenerator: GPUGenerator<Chunk> | null = null;
   private chunkManager: ChunkManager | null = null;
   private sceneGraph: SceneGraph | null = null;
   private raycaster = new THREE.Raycaster();
@@ -88,6 +89,7 @@ export class TerrainEngine {
   private statsWindowStart = -1;
   private statsFrames = 0;
   private statsCpuMs = 0;
+  private statsStartGenerated = 0;
   private readonly statsStartPosition = new THREE.Vector3();
 
   async init(canvas: HTMLCanvasElement, customConfig?: Partial<TerrainConfig>): Promise<boolean> {
@@ -109,9 +111,11 @@ export class TerrainEngine {
       this.initCamera();
       this.initLights();
 
-      this.gpuGenerator = new GPUGenerator(this.renderer!, this.config);
+      this.gpuGenerator = new GPUGenerator<Chunk>(this.renderer!, this.config);
       this.chunkManager = new ChunkManager(this.config, this.gpuGenerator);
-      this.sceneGraph = new SceneGraph(this.scene!, this.config);
+      this.sceneGraph = new SceneGraph(this.scene!, this.config, this.gpuGenerator);
+
+      this.prewarmPipelines();
 
       this.setupResizeHandling();
 
@@ -196,6 +200,18 @@ export class TerrainEngine {
     sun.shadow.camera.bottom = -200;
 
     this.scene.add(sun);
+  }
+
+  private prewarmPipelines(): void {
+    if (!this.renderer || !this.scene || !this.camera || !this.gpuGenerator || !this.sceneGraph) {
+      return;
+    }
+
+    this.gpuGenerator.prewarm();
+    this.sceneGraph.prewarm(this.gpuGenerator.getPages());
+    this.camera.updateMatrixWorld(true);
+    this.renderer.render(this.scene, this.camera);
+    this.sceneGraph.endPrewarm();
   }
 
   private setupResizeHandling(): void {
@@ -359,6 +375,7 @@ export class TerrainEngine {
       this.statsFrames = 0;
       this.statsCpuMs = 0;
       this.statsStartPosition.copy(this.camera.position);
+      this.statsStartGenerated = this.gpuGenerator?.generatedCount ?? 0;
       return;
     }
 
@@ -374,6 +391,7 @@ export class TerrainEngine {
     this.statsFrames = 0;
     this.statsCpuMs = 0;
     this.statsStartPosition.copy(this.camera.position);
+    this.statsStartGenerated = this.gpuGenerator?.generatedCount ?? 0;
   }
 
   private publishStats(elapsedMs: number): void {
@@ -388,12 +406,12 @@ export class TerrainEngine {
       chunkUpdateMs: chunkStats.updateTimeMs,
       visibleChunks: chunkStats.visibleCount,
       readyChunks: chunkStats.readyCount,
-      generatingChunks: chunkStats.generatingCount,
+      generatedPerSecond:
+        (((this.gpuGenerator?.generatedCount ?? 0) - this.statsStartGenerated) * 1000) / elapsedMs,
+      exactBoundsChunks: chunkStats.exactBoundsCount,
       pendingChunks: chunkStats.pendingCount,
       estimatedVRAMBytes:
-        chunkStats.storageBytes +
-        (this.sceneGraph?.getGeometryBytes() ?? 0) +
-        (this.gpuGenerator?.getPooledBytes() ?? 0),
+        (this.gpuGenerator?.getAllocatedBytes() ?? 0) + (this.sceneGraph?.getGeometryBytes() ?? 0),
       cameraX: position.x,
       cameraY: position.y,
       cameraZ: position.z,

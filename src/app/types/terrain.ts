@@ -51,12 +51,6 @@ export interface TerrainConfig {
    */
   readonly ANTICIPATION_FRAMES: number;
   /**
-   * Maximum number of concurrent GPU chunk-generation promises.
-   * Hard cap — additional requests stay in the ring buffer.
-   * Range: [1, 8]. Default: 4.
-   */
-  readonly MAX_CONCURRENT_GENERATIONS: number;
-  /**
    * Weight of camera velocity direction in the priority score.
    * 0 = pure distance, 1 = pure look-ahead. Default: 0.6.
    */
@@ -67,11 +61,6 @@ export interface TerrainConfig {
    * Default: 256.
    */
   readonly RING_BUFFER_CAPACITY: number;
-  /**
-   * Milliseconds before an in-flight generation slot is force-released.
-   * Prevents GPU hangs from starving the pool. Default: 5000 ms.
-   */
-  readonly GENERATION_TIMEOUT_MS: number;
 }
 
 /**
@@ -220,7 +209,7 @@ export const DEFAULT_TERRAIN_CONFIG: Readonly<TerrainConfig> = {
   CHUNK_RESOLUTIONS: { 0: 64, 1: 32, 2: 16, 3: 8 },
   LOD_DISTANCES: [600, 1500, 3000],
   LOD_TRANSITION_RANGE: 50,
-  GENERATION_BUDGET: 4,
+  GENERATION_BUDGET: 16,
   UNLOAD_DELAY_FRAMES: 60,
   PENDING_QUEUE_MAX: 128,
   NOISE_SEED: 12345,
@@ -240,10 +229,8 @@ export const DEFAULT_TERRAIN_CONFIG: Readonly<TerrainConfig> = {
   COMPUTE_WORKGROUP_SIZE: 8,
   // Streaming / Buffer de Anticipación
   ANTICIPATION_FRAMES: 60,
-  MAX_CONCURRENT_GENERATIONS: 4,
   VELOCITY_WEIGHT: 0.6,
   RING_BUFFER_CAPACITY: 256,
-  GENERATION_TIMEOUT_MS: 5000,
 } as const;
 
 /**
@@ -255,7 +242,7 @@ export const TERRAIN_LIMITS = {
   MIN_RESOLUTION: 4,
   MAX_RESOLUTION: 256,
   MAX_LOD_LEVELS: 4,
-  MAX_GENERATION_BUDGET: 8,
+  MAX_GENERATION_BUDGET: 64,
   MIN_UNLOAD_DELAY: 10,
   MAX_PENDING_QUEUE: 128,
   MAX_WARP_STRENGTH: 1.0,

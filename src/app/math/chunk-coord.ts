@@ -297,5 +297,44 @@ export function spatialKeyOf(coord: { readonly x: number; readonly z: number }):
 }
 
 export function isRenderableChunk(chunk: Chunk): boolean {
-  return (chunk.state === 'ready' || chunk.state === 'unloading') && chunk.geometryData !== undefined;
+  return (chunk.state === 'ready' || chunk.state === 'unloading') && chunk.gpu !== null;
+}
+
+export const ANALYTIC_HEIGHT_MARGIN = 0.1;
+
+export function analyticHeightRange(
+  heightScale: number,
+  offsetY: number,
+): { readonly min: number; readonly max: number } {
+  const margin = Math.abs(heightScale) * ANALYTIC_HEIGHT_MARGIN;
+  return {
+    min: offsetY + Math.min(0, heightScale) - margin,
+    max: offsetY + Math.max(0, heightScale) + margin,
+  };
+}
+
+export function boundsFromHeights(
+  coord: ChunkCoord,
+  chunkSize: number,
+  minHeight: number,
+  maxHeight: number,
+): ChunkBounds {
+  const minX = coord.x * chunkSize;
+  const minZ = coord.z * chunkSize;
+  const maxX = minX + chunkSize;
+  const maxZ = minZ + chunkSize;
+  const center = {
+    x: (minX + maxX) / 2,
+    y: (minHeight + maxHeight) / 2,
+    z: (minZ + maxZ) / 2,
+  };
+  const hx = chunkSize / 2;
+  const hy = (maxHeight - minHeight) / 2;
+
+  return {
+    min: { x: minX, y: minHeight, z: minZ },
+    max: { x: maxX, y: maxHeight, z: maxZ },
+    center,
+    radius: Math.sqrt(hx * hx * 2 + hy * hy),
+  };
 }

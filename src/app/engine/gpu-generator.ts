@@ -1,396 +1,432 @@
-import * as THREE from 'three';
-import { WebGPURenderer } from 'three/webgpu';
-import { storage } from 'three/tsl';
+import { StorageBufferAttribute, WebGPURenderer } from 'three/webgpu';
 
 import {
-  createElevationComputeNode,
+  createHeightKernels,
+  createNoiseUniforms,
+  decodeOrderedFloat,
   seedToNoiseOffset,
   MAX_NOISE_OCTAVES,
+  NoiseUniforms,
 } from '../shaders/elevation.tsl';
-import { ChunkCoord, ChunkGeometryData, ChunkBounds, ChunkGPUResources } from '../types/chunk';
+import { ChunkCoord, ChunkGPUResources, ChunkLOD } from '../types/chunk';
 import { TerrainConfig } from '../types/terrain';
 
-type StorageBufferAttribute = THREE.InstancedBufferAttribute & {
-  isStorageBufferAttribute?: boolean;
-  gpuWrite?: boolean;
-  buffer?: GPUBuffer;
-};
+const PAGE_HEADROOM = 1.25;
+const GROWTH_PAGE_FRACTION = 0.25;
+const MIN_PAGE_SLOTS = 16;
+const DEFAULT_MAX_STORAGE_BINDING_BYTES = 128 * 1024 * 1024;
+const LODS: readonly ChunkLOD[] = [0, 1, 2, 3];
 
-export class GPUGenerator {
+const MAX_POOLED_STAGING_PER_SIZE = 4;
+
+export interface HeightListener<TOwner> {
+  onBounds(owner: TOwner, minHeight: number, maxHeight: number): void;
+  onHeights(owner: TOwner, heights: Float32Array | null): void;
+}
+
+export interface HeightPage {
+  readonly id: number;
+  readonly resolution: number;
+  readonly capacity: number;
+  readonly heights: StorageBufferAttribute;
+}
+
+interface PendingSlot<TOwner> {
+  readonly slot: number;
+  readonly generation: number;
+  readonly owner: TOwner;
+}
+
+interface PageState<TOwner> extends HeightPage {
+  readonly bounds: StorageBufferAttribute;
+  readonly jobs: StorageBufferAttribute;
+  readonly kernels: ReturnType<typeof createHeightKernels>;
+  readonly generations: Uint32Array;
+  readonly owners: (TOwner | null)[];
+  readonly freeSlots: number[];
+  jobCount: number;
+  boundsPending: PendingSlot<TOwner>[];
+  boundsInFlight: boolean;
+  heightRequests: PendingSlot<TOwner>[];
+}
+
+export class GPUGenerator<TOwner = unknown> {
   private readonly renderer: WebGPURenderer;
   private readonly config: TerrainConfig;
+  private readonly noise: NoiseUniforms;
+  private readonly maxJobs: number;
 
-  private computePipelines = new Map<
-    number,
-    {
-      elevationNode: ReturnType<typeof createElevationComputeNode>;
-      positionStorageNode: any;
-      elevationCompute: any;
-    }
-  >();
+  private readonly pages: PageState<TOwner>[] = [];
+  private readonly pagesByResolution = new Map<number, PageState<TOwner>[]>();
+  private readonly dirtyPages = new Set<PageState<TOwner>>();
+  private readonly stagingPool = new Map<number, GPUBuffer[]>();
 
-  private bufferPool = new Map<number, StorageBufferAttribute[]>();
-  private indexBuffers = new Map<number, THREE.BufferAttribute>();
-  private stagingBuffers = new Map<number, GPUBuffer[]>();
-
-  private device: GPUDevice | null = null;
-  private queue: GPUQueue | null = null;
-  private backend: any = null;
-
-  private readonly seedOffset: { x: number; z: number };
+  private listener: HeightListener<TOwner> | null = null;
+  private disposed = false;
+  private generatedTotal = 0;
 
   constructor(renderer: WebGPURenderer, config: TerrainConfig) {
     this.renderer = renderer;
     this.config = config;
-    this.seedOffset = seedToNoiseOffset(config.NOISE_SEED);
-    this.extractWebGPUBackend();
+    this.maxJobs = Math.max(1, Math.floor(config.GENERATION_BUDGET));
+    this.noise = createNoiseUniforms();
+    this.applyNoiseConfig();
   }
 
-  private extractWebGPUBackend() {
-    this.backend = (this.renderer as any).backend;
-    if (this.backend?.device) {
-      this.device = this.backend.device as GPUDevice;
-      this.queue = this.device.queue;
+  private applyNoiseConfig(): void {
+    const n = this.noise;
+    const c = this.config;
+    const seedOffset = seedToNoiseOffset(c.NOISE_SEED);
+    const clampOctaves = (v: number) => Math.max(1, Math.min(MAX_NOISE_OCTAVES, Math.round(v)));
+
+    n.chunkSize.value = c.CHUNK_SIZE;
+    n.seedOffsetX.value = seedOffset.x;
+    n.seedOffsetZ.value = seedOffset.z;
+    n.octaves.value = clampOctaves(c.NOISE_OCTAVES);
+    n.persistence.value = c.NOISE_PERSISTENCE;
+    n.lacunarity.value = c.NOISE_LACUNARITY;
+    n.heightScale.value = c.TERRAIN_HEIGHT_SCALE;
+    n.offsetY.value = c.TERRAIN_OFFSET_Y;
+    n.warpEnabled.value = c.NOISE_WARP_ENABLED ? 1 : 0;
+    n.warpStrength.value = c.NOISE_WARP_STRENGTH;
+    n.warpOctaves.value = clampOctaves(c.NOISE_WARP_OCTAVES);
+    n.warpScale.value = c.NOISE_WARP_SCALE;
+  }
+
+  setListener(listener: HeightListener<TOwner> | null): void {
+    this.listener = listener;
+  }
+
+  get generatedCount(): number {
+    return this.generatedTotal;
+  }
+
+  getPage(pageId: number): HeightPage | undefined {
+    return this.pages[pageId];
+  }
+
+  getPages(): readonly HeightPage[] {
+    return this.pages;
+  }
+
+  prewarm(): void {
+    const resolutions = new Set(LODS.map((lod) => this.config.CHUNK_RESOLUTIONS[lod]));
+    for (const resolution of resolutions) {
+      const page = this.acquirePage(resolution);
+      page.kernels.jobCount.value = 0;
+      this.renderer.compute(page.kernels.reset, 1);
+      this.renderer.compute(page.kernels.main, 1);
     }
   }
 
-  async generateChunk(
-    coord: ChunkCoord,
-    existingResources?: ChunkGPUResources | null,
-  ): Promise<{
-    geometry?: ChunkGeometryData;
-    bounds: ChunkBounds;
-    gpuResources: ChunkGPUResources;
-    readyToRender: boolean;
-  }> {
-    if (!this.device || !this.queue) {
-      throw new Error('WebGPU not initialized');
+  estimatePageCapacity(resolution: number): number {
+    const size = this.config.CHUNK_SIZE;
+    const distances = this.config.LOD_DISTANCES;
+    const maxDist = Math.max(...distances) * 1.2;
+    const margin = size * Math.SQRT1_2;
+
+    let chunks = 0;
+    for (const lod of LODS) {
+      if (this.config.CHUNK_RESOLUTIONS[lod] !== resolution) continue;
+      const inner = lod === 0 ? 0 : distances[lod - 1];
+      const outer = lod === 3 ? maxDist : Math.min(distances[lod], maxDist);
+      if (outer <= inner) continue;
+      const area = Math.PI * ((outer + margin) ** 2 - Math.max(0, inner - margin) ** 2);
+      chunks += area / (size * size);
+    }
+
+    return Math.max(MIN_PAGE_SLOTS, Math.ceil(chunks * PAGE_HEADROOM));
+  }
+
+  generate(coord: ChunkCoord, owner: TOwner): ChunkGPUResources {
+    if (this.disposed) {
+      throw new Error('GPUGenerator has been disposed');
     }
 
     const resolution = this.config.CHUNK_RESOLUTIONS[coord.lod];
-    const vertexCount = resolution * resolution;
+    const page = this.acquirePage(resolution);
 
-    const pipeline = this.getComputePipeline(resolution);
-    const positionStorage = this.getStorageBuffer(vertexCount);
-
-    try {
-      pipeline.positionStorageNode.value = positionStorage;
-
-      this.updateElevationUniforms(pipeline.elevationNode, coord);
-
-      this.renderer.compute(pipeline.elevationCompute as any);
-
-      await this.waitForGPU();
-
-      if ((this.renderer as any).resolveTimestamps) {
-        (this.renderer as any).resolveTimestamps();
-      }
-
-      let posGPUBuffer = this.extractGPUBuffer(positionStorage);
-      if (!posGPUBuffer) {
-        await new Promise((r) => requestAnimationFrame(r));
-        posGPUBuffer = this.extractGPUBuffer(positionStorage);
-      }
-
-      if (!posGPUBuffer) {
-        throw new Error(`Storage buffer not available for chunk ${coord.x}:${coord.z}:${coord.lod}`);
-      }
-
-      const { positions, minHeight, maxHeight } = await this.readbackGeometry(
-        posGPUBuffer,
-        resolution,
-      );
-
-      const gpuResources: ChunkGPUResources = {
-        positionBuffer: positionStorage,
-        normalBuffer: null, // Normals removed for optimization
-        indexBuffer: this.getIndexBuffer(resolution),
-        uniformBuffer: null,
-        bindGroup: null,
-        indexCount: (resolution - 1) * (resolution - 1) * 6,
-        vertexCount: vertexCount,
-      } as unknown as ChunkGPUResources;
-
-      const geometry: ChunkGeometryData = {
-        positions,
-        normals: new Float32Array(0), // Empty array to fulfill type requirement
-        indices: this.generateIndices(resolution),
-        bounds: { minHeight, maxHeight },
-      };
-
-      return {
-        geometry,
-        bounds: this.calculateBoundsFromGeometry(geometry, coord),
-        gpuResources,
-        readyToRender: true,
-      };
-    } catch (error) {
-      this.returnStorageBuffer(positionStorage);
-      throw error;
+    if (page.jobCount >= this.maxJobs) {
+      this.flushPage(page);
     }
+
+    const slot = page.freeSlots.pop()!;
+    const generation = page.generations[slot];
+    page.owners[slot] = owner;
+
+    const jobs = page.jobs.array as Float32Array;
+    const base = page.jobCount * 4;
+    jobs[base] = coord.x * this.config.CHUNK_SIZE;
+    jobs[base + 1] = coord.z * this.config.CHUNK_SIZE;
+    jobs[base + 2] = slot;
+    jobs[base + 3] = 0;
+    page.jobCount++;
+
+    page.boundsPending.push({ slot, generation, owner });
+    this.dirtyPages.add(page);
+    this.generatedTotal++;
+
+    return { pageId: page.id, slot, generation, resolution };
   }
 
-  private getComputePipeline(resolution: number) {
-    if (!this.computePipelines.has(resolution)) {
-      const vertexCount = resolution * resolution;
+  release(resources: ChunkGPUResources): void {
+    const page = this.pages[resources.pageId];
+    if (!page || page.generations[resources.slot] !== resources.generation) return;
 
-      const posDummy = new Float32Array(vertexCount);
-      const posAttr = new THREE.InstancedBufferAttribute(posDummy, 1) as StorageBufferAttribute;
-      posAttr.isStorageBufferAttribute = true;
+    this.removeQueuedJob(page, resources.slot);
 
-      const positionStorageNode = storage(posAttr as any, 'float', vertexCount);
-
-      const elevationNode = createElevationComputeNode(resolution);
-      const elevationCompute = elevationNode.computeFn(positionStorageNode).compute(vertexCount);
-
-      this.computePipelines.set(resolution, {
-        elevationNode,
-        positionStorageNode,
-        elevationCompute,
-      });
-    }
-    return this.computePipelines.get(resolution)!;
+    page.generations[resources.slot] = (page.generations[resources.slot] + 1) >>> 0;
+    page.owners[resources.slot] = null;
+    page.freeSlots.push(resources.slot);
   }
 
-  private updateElevationUniforms(
-    node: ReturnType<typeof createElevationComputeNode>,
-    coord: ChunkCoord,
-  ) {
-    const u = node.uniforms;
-    u.chunkOriginX.value = coord.x * this.config.CHUNK_SIZE;
-    u.chunkOriginZ.value = coord.z * this.config.CHUNK_SIZE;
-    u.chunkSize.value = this.config.CHUNK_SIZE;
-    u.seedOffsetX.value = this.seedOffset.x;
-    u.seedOffsetZ.value = this.seedOffset.z;
-    u.octaves.value = Math.max(1, Math.min(MAX_NOISE_OCTAVES, Math.round(this.config.NOISE_OCTAVES)));
-    u.persistence.value = this.config.NOISE_PERSISTENCE;
-    u.lacunarity.value = this.config.NOISE_LACUNARITY;
-    u.heightScale.value = this.config.TERRAIN_HEIGHT_SCALE;
-    u.offsetY.value = this.config.TERRAIN_OFFSET_Y;
-    u.warpEnabled.value = this.config.NOISE_WARP_ENABLED ? 1 : 0;
-    u.warpStrength.value = this.config.NOISE_WARP_STRENGTH;
-    u.warpOctaves.value = Math.max(
-      1,
-      Math.min(MAX_NOISE_OCTAVES, Math.round(this.config.NOISE_WARP_OCTAVES)),
-    );
-    u.warpScale.value = this.config.NOISE_WARP_SCALE;
+  requestHeights(resources: ChunkGPUResources, owner: TOwner): boolean {
+    const page = this.pages[resources.pageId];
+    if (!page || page.generations[resources.slot] !== resources.generation) return false;
+
+    page.heightRequests.push({ slot: resources.slot, generation: resources.generation, owner });
+    this.dirtyPages.add(page);
+    return true;
   }
 
-  private getStorageBuffer(floatCount: number): StorageBufferAttribute {
-    const byteLength = floatCount * 4;
+  flush(): void {
+    if (this.disposed) return;
 
-    const pooled = this.bufferPool.get(byteLength);
-    if (pooled && pooled.length > 0) {
-      const buffer = pooled.pop()!;
-      (buffer.array as Float32Array).fill(0);
-      return buffer;
+    for (const page of this.dirtyPages) {
+      if (page.jobCount > 0) this.flushPage(page);
+      this.startBoundsReadback(page);
+      this.startHeightReadbacks(page);
     }
-
-    const array = new Float32Array(floatCount);
-    const attr = new THREE.InstancedBufferAttribute(array, 1) as StorageBufferAttribute;
-    attr.isStorageBufferAttribute = true;
-    attr.gpuWrite = true;
-
-    return attr;
+    this.dirtyPages.clear();
   }
 
-  private extractGPUBuffer(storageAttr: StorageBufferAttribute): GPUBuffer | null {
-    if ((storageAttr as any).buffer) {
-      return (storageAttr as any).buffer;
-    }
-
-    if (this.backend?.get) {
-      const resource = this.backend.get(storageAttr);
-      if (resource?.buffer) return resource.buffer;
-    }
-
-    if (this.backend?.data?.has) {
-      const resource = this.backend.data.get(storageAttr);
-      if (resource?.buffer) return resource.buffer;
-    }
-
-    return null;
-  }
-
-  private getIndexBuffer(resolution: number): THREE.BufferAttribute {
-    if (this.indexBuffers.has(resolution)) {
-      return this.indexBuffers.get(resolution)!;
-    }
-
-    const indices = this.generateIndices(resolution);
-    const buffer = new THREE.BufferAttribute(indices, 1);
-    this.indexBuffers.set(resolution, buffer);
-    return buffer;
-  }
-
-  private async waitForGPU(): Promise<void> {
-    if (!this.device || !this.queue) {
-      await new Promise((r) => setTimeout(r, 0));
-      return;
-    }
-
-    if ((this.queue as any)?.onSubmittedWorkDone) {
-      await (this.queue as any).onSubmittedWorkDone();
-      return;
-    }
-
-    try {
-      const encoder = this.device.createCommandEncoder();
-      this.queue.submit([encoder.finish()]);
-      await new Promise((r) => setTimeout(r, 0));
-    } catch {
-      await new Promise((r) => setTimeout(r, 0));
-    }
-  }
-
-  private async readbackGeometry(
-    positionBuffer: GPUBuffer,
-    resolution: number,
-  ): Promise<{
-    positions: Float32Array;
-    minHeight: number;
-    maxHeight: number;
-  }> {
-    if (!this.device) {
-      throw new Error('WebGPU device no disponible');
-    }
-
-    if (!this.queue) {
-      throw new Error('WebGPU queue no disponible');
-    }
-
-    const vertexCount = resolution * resolution;
-    const posSize = vertexCount * 4;
-
-    const posStaging = this.getStagingBuffer(posSize);
-
-    try {
-      const encoder = this.device.createCommandEncoder();
-      encoder.copyBufferToBuffer(positionBuffer, 0, posStaging, 0, posSize);
-      this.queue.submit([encoder.finish()]);
-
-      await posStaging.mapAsync(GPUMapMode.READ);
-    } catch (error) {
-      this.releaseStagingBuffer(posSize, posStaging);
-      throw error;
-    }
-
-    const posMapped = new Float32Array(posStaging.getMappedRange());
-
-    const positions = new Float32Array(vertexCount * 3);
-    let minHeight = Infinity,
-      maxHeight = -Infinity;
-
-    for (let i = 0; i < vertexCount; i++) {
-      const x = i % resolution;
-      const z = Math.floor(i / resolution);
-      const height = posMapped[i];
-
-      if (height < minHeight) minHeight = height;
-      if (height > maxHeight) maxHeight = height;
-
-      positions[i * 3] = (x / (resolution - 1)) * this.config.CHUNK_SIZE;
-      positions[i * 3 + 1] = height;
-      positions[i * 3 + 2] = (z / (resolution - 1)) * this.config.CHUNK_SIZE;
-    }
-
-    posStaging.unmap();
-    this.releaseStagingBuffer(posSize, posStaging);
-
-    return { positions, minHeight, maxHeight };
-  }
-
-  private getStagingBuffer(size: number): GPUBuffer {
-    if (!this.device) throw new Error('Device no disponible');
-
-    if (!this.stagingBuffers.has(size)) {
-      this.stagingBuffers.set(size, []);
-    }
-
-    const pool = this.stagingBuffers.get(size)!;
-    if (pool.length > 0) {
-      return pool.pop()!;
-    }
-
-    return this.device.createBuffer({
-      size,
-      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-    });
-  }
-
-  private releaseStagingBuffer(size: number, buffer: GPUBuffer) {
-    if (buffer.mapState !== 'unmapped') {
-      try {
-        buffer.unmap();
-      } catch (e) {}
-    }
-    const pool = this.stagingBuffers.get(size);
-    if (pool) pool.push(buffer);
-  }
-
-  private generateIndices(resolution: number): Uint16Array {
-    const indices: number[] = [];
-    for (let z = 0; z < resolution - 1; z++) {
-      for (let x = 0; x < resolution - 1; x++) {
-        const tl = z * resolution + x;
-        const tr = tl + 1;
-        const bl = (z + 1) * resolution + x;
-        const br = bl + 1;
-        indices.push(tl, bl, tr, tr, bl, br);
-      }
-    }
-    return new Uint16Array(indices);
-  }
-
-  private calculateBoundsFromGeometry(data: ChunkGeometryData, coord: ChunkCoord): ChunkBounds {
-    const originX = coord.x * this.config.CHUNK_SIZE;
-    const originZ = coord.z * this.config.CHUNK_SIZE;
-
-    const min = { x: originX, y: data.bounds.minHeight, z: originZ };
-    const max = {
-      x: originX + this.config.CHUNK_SIZE,
-      y: data.bounds.maxHeight,
-      z: originZ + this.config.CHUNK_SIZE,
-    };
-    const center = { x: (min.x + max.x) / 2, y: (min.y + max.y) / 2, z: (min.z + max.z) / 2 };
-    const radius = Math.sqrt(
-      Math.pow(max.x - center.x, 2) + Math.pow(max.y - center.y, 2) + Math.pow(max.z - center.z, 2),
-    );
-
-    return { min, max, center, radius };
-  }
-
-  getPooledBytes(): number {
+  getAllocatedBytes(): number {
     let bytes = 0;
-    for (const [byteLength, pool] of this.bufferPool) bytes += byteLength * pool.length;
-    for (const [size, pool] of this.stagingBuffers) bytes += size * pool.length;
+    for (const page of this.pages) {
+      bytes += page.heights.array.byteLength + page.bounds.array.byteLength + page.jobs.array.byteLength;
+    }
+    for (const [size, pool] of this.stagingPool) bytes += size * pool.length;
     return bytes;
   }
 
-  releaseResources(resources: ChunkGPUResources) {
-    this.returnStorageBuffer(resources.positionBuffer as StorageBufferAttribute | null);
-    // Normals are now null, nothing to release
+  private acquirePage(resolution: number): PageState<TOwner> {
+    let list = this.pagesByResolution.get(resolution);
+    if (!list) {
+      list = [];
+      this.pagesByResolution.set(resolution, list);
+    }
+
+    for (const page of list) {
+      if (page.freeSlots.length > 0) return page;
+    }
+
+    const verticesPerChunk = resolution * resolution;
+    const estimate = this.estimatePageCapacity(resolution);
+    const requested =
+      list.length === 0
+        ? estimate
+        : Math.max(MIN_PAGE_SLOTS, Math.ceil(estimate * GROWTH_PAGE_FRACTION));
+    const maxBindingBytes: number =
+      (this.renderer as any).backend?.device?.limits?.maxStorageBufferBindingSize ??
+      DEFAULT_MAX_STORAGE_BINDING_BYTES;
+    const capacity = Math.max(
+      1,
+      Math.min(requested, Math.floor(maxBindingBytes / (verticesPerChunk * 4))),
+    );
+
+    const heights = new StorageBufferAttribute(new Float32Array(capacity * verticesPerChunk), 1);
+    const bounds = new StorageBufferAttribute(new Uint32Array(capacity * 2), 1);
+    const jobs = new StorageBufferAttribute(new Float32Array(this.maxJobs * 4), 4);
+
+    const kernels = createHeightKernels({
+      resolution,
+      maxJobs: this.maxJobs,
+      heights,
+      bounds,
+      jobs,
+      noise: this.noise,
+    });
+
+    const freeSlots: number[] = [];
+    for (let i = capacity - 1; i >= 0; i--) freeSlots.push(i);
+
+    const page: PageState<TOwner> = {
+      id: this.pages.length,
+      resolution,
+      capacity,
+      heights,
+      bounds,
+      jobs,
+      kernels,
+      generations: new Uint32Array(capacity),
+      owners: new Array<TOwner | null>(capacity).fill(null),
+      freeSlots,
+      jobCount: 0,
+      boundsPending: [],
+      boundsInFlight: false,
+      heightRequests: [],
+    };
+
+    this.pages.push(page);
+    list.push(page);
+    return page;
   }
 
-  private returnStorageBuffer(buf: StorageBufferAttribute | null | undefined) {
-    if (!buf?.array) return;
-    const byteLength = (buf.array as Float32Array).byteLength;
+  private removeQueuedJob(page: PageState<TOwner>, slot: number): void {
+    const jobs = page.jobs.array as Float32Array;
+    for (let i = 0; i < page.jobCount; i++) {
+      if (jobs[i * 4 + 2] !== slot) continue;
+      const last = (page.jobCount - 1) * 4;
+      jobs[i * 4] = jobs[last];
+      jobs[i * 4 + 1] = jobs[last + 1];
+      jobs[i * 4 + 2] = jobs[last + 2];
+      jobs[i * 4 + 3] = jobs[last + 3];
+      page.jobCount--;
+      return;
+    }
+  }
 
-    let pool = this.bufferPool.get(byteLength);
+  private flushPage(page: PageState<TOwner>): void {
+    const count = page.jobCount;
+    if (count === 0) return;
+
+    page.jobs.needsUpdate = true;
+    page.kernels.jobCount.value = count;
+
+    this.renderer.compute(page.kernels.reset, count);
+    this.renderer.compute(page.kernels.main, count * page.kernels.verticesPerChunk);
+
+    page.jobCount = 0;
+  }
+
+  private startBoundsReadback(page: PageState<TOwner>): void {
+    if (this.disposed || page.boundsInFlight || page.boundsPending.length === 0) return;
+
+    if (page.jobCount > 0) this.flushPage(page);
+
+    const batch = page.boundsPending;
+    page.boundsPending = [];
+    page.boundsInFlight = true;
+
+    let firstSlot = Infinity;
+    let lastSlot = -Infinity;
+    for (const item of batch) {
+      if (item.slot < firstSlot) firstSlot = item.slot;
+      if (item.slot > lastSlot) lastSlot = item.slot;
+    }
+
+    this.readRange(page.bounds, firstSlot * 8, (lastSlot - firstSlot + 1) * 8)
+      .then((buffer) => {
+        if (this.disposed) return;
+        const keys = new Uint32Array(buffer);
+        for (const item of batch) {
+          if (page.generations[item.slot] !== item.generation) continue;
+          const local = item.slot - firstSlot;
+          const minHeight = decodeOrderedFloat(keys[local * 2]);
+          const maxHeight = decodeOrderedFloat(keys[local * 2 + 1]);
+          if (!Number.isFinite(minHeight) || !Number.isFinite(maxHeight)) continue;
+          this.listener?.onBounds(item.owner, minHeight, maxHeight);
+        }
+      })
+      .catch((error) => {
+        console.error('[GPUGenerator] Bounds readback failed:', error);
+        page.boundsPending.push(...batch);
+      })
+      .finally(() => {
+        page.boundsInFlight = false;
+        if (!this.disposed && page.boundsPending.length > 0) this.startBoundsReadback(page);
+      });
+  }
+
+  private startHeightReadbacks(page: PageState<TOwner>): void {
+    if (this.disposed || page.heightRequests.length === 0) return;
+
+    if (page.jobCount > 0) this.flushPage(page);
+
+    const requests = page.heightRequests;
+    page.heightRequests = [];
+
+    const bytesPerChunk = page.resolution * page.resolution * 4;
+
+    for (const request of requests) {
+      if (page.generations[request.slot] !== request.generation) {
+        this.listener?.onHeights(request.owner, null);
+        continue;
+      }
+
+      this.readRange(page.heights, request.slot * bytesPerChunk, bytesPerChunk)
+        .then((buffer) => {
+          if (this.disposed) return;
+          const valid = page.generations[request.slot] === request.generation;
+          this.listener?.onHeights(request.owner, valid ? new Float32Array(buffer) : null);
+        })
+        .catch((error) => {
+          console.error('[GPUGenerator] Height readback failed:', error);
+          if (!this.disposed) this.listener?.onHeights(request.owner, null);
+        });
+    }
+  }
+
+  private async readRange(
+    attribute: StorageBufferAttribute,
+    byteOffset: number,
+    byteLength: number,
+  ): Promise<ArrayBuffer> {
+    const backend = (this.renderer as any).backend;
+    const device: GPUDevice | undefined = backend?.device;
+    const source: GPUBuffer | undefined = backend?.get?.(attribute)?.buffer;
+
+    if (!device || !source) {
+      const full = await this.renderer.getArrayBufferAsync(attribute);
+      return full.slice(byteOffset, byteOffset + byteLength);
+    }
+
+    const staging = this.acquireStaging(device, byteLength);
+    const encoder = device.createCommandEncoder();
+    encoder.copyBufferToBuffer(source, byteOffset, staging, 0, byteLength);
+    device.queue.submit([encoder.finish()]);
+
+    try {
+      await staging.mapAsync(GPUMapMode.READ);
+      return staging.getMappedRange().slice(0);
+    } finally {
+      if (staging.mapState === 'mapped') staging.unmap();
+      this.releaseStaging(byteLength, staging);
+    }
+  }
+
+  private acquireStaging(device: GPUDevice, size: number): GPUBuffer {
+    const pool = this.stagingPool.get(size);
+    if (pool && pool.length > 0) return pool.pop()!;
+    return device.createBuffer({ size, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+  }
+
+  private releaseStaging(size: number, buffer: GPUBuffer): void {
+    if (this.disposed) {
+      buffer.destroy();
+      return;
+    }
+    let pool = this.stagingPool.get(size);
     if (!pool) {
       pool = [];
-      this.bufferPool.set(byteLength, pool);
+      this.stagingPool.set(size, pool);
     }
-    if (!pool.includes(buf)) pool.push(buf);
+    if (pool.length < MAX_POOLED_STAGING_PER_SIZE) {
+      pool.push(buffer);
+    } else {
+      buffer.destroy();
+    }
   }
 
-  dispose() {
-    this.bufferPool.clear();
-    this.indexBuffers.clear();
-    this.stagingBuffers.forEach((pool) => pool.forEach((b) => b.destroy()));
-    this.stagingBuffers.clear();
-    this.device = null;
-    this.queue = null;
-    this.backend = null;
+  dispose(): void {
+    this.disposed = true;
+    this.listener = null;
+    this.dirtyPages.clear();
+    for (const pool of this.stagingPool.values()) {
+      for (const buffer of pool) buffer.destroy();
+    }
+    this.stagingPool.clear();
+    this.pages.length = 0;
+    this.pagesByResolution.clear();
   }
 }

@@ -25,8 +25,8 @@
           <span class="value">{{ stats?.readyChunks ?? 0 }}</span>
         </div>
         <div class="metric-row">
-          <span class="label">Generating GPU</span>
-          <span class="value">{{ stats?.generatingChunks ?? 0 }}</span>
+          <span class="label">Generated / s</span>
+          <span class="value">{{ stats?.generatedPerSecond ?? 0 | number: '1.0-0' }}</span>
         </div>
         <div class="metric-row">
           <span class="label">Pending Queue</span>

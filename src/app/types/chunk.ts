@@ -90,17 +90,12 @@ export interface ChunkGPUSync {
 /**
  * GPU resources allocated to the chunk.
  * Optional because they don't exist during 'pending'/'generating'
- * NOTE: I use 'unknown' to avoid dependency on @webgpu/types
- * in this layer. The engine/gpu-generator.ts handles the casting to WebGPU types
  */
 export interface ChunkGPUResources {
-  readonly positionBuffer: unknown;
-  readonly normalBuffer: unknown;
-  readonly indexBuffer: unknown;
-  readonly uniformBuffer: unknown;
-  readonly bindGroup: unknown;
-  readonly indexCount: number;
-  readonly vertexCount: number;
+  readonly pageId: number;
+  readonly slot: number;
+  readonly generation: number;
+  readonly resolution: number;
 }
 
 /**
@@ -142,7 +137,7 @@ export interface Chunk {
 
   mesh: unknown | null;
 
-  geometryData?: ChunkGeometryData;
+  heights?: Float32Array;
 
   failure?: ChunkFailure;
 }
@@ -170,19 +165,6 @@ export interface StreamingRequest {
   readonly enqueuedAt: number;
   /** Number of generation attempts (for retry throttling). */
   attempts: number;
-}
-
-/**
- * Active slot in the ConcurrencyPool.
- * Tracks an in-flight GPU generation promise with a timeout guard.
- */
-export interface ConcurrencySlot {
-  /** Resolves when generateChunk() completes (success or error). */
-  readonly promise: Promise<void>;
-  /** performance.now() stamp when the slot was reserved. */
-  readonly startedAt: number;
-  /** Whether the underlying async work has settled (set by the closure). */
-  settled: boolean;
 }
 
 /**
@@ -217,20 +199,6 @@ export interface TerrainConfig {
  * Unique Hash for Maps/Sets: "x:z:lod"
  */
 export type ChunkKey = `${number}:${number}:${ChunkLOD}`;
-
-/**
- * Raw data from the compute shader.
- * We use Structure of Arrays (SoA) instead of interleaved (AoS)
- */
-export interface ChunkGeometryData {
-  readonly positions: Float32Array;
-  readonly normals: Float32Array;
-  readonly indices: Uint16Array;
-  readonly bounds: {
-    readonly minHeight: number;
-    readonly maxHeight: number;
-  };
-}
 
 /**
  * Cardinal directions for neighbors

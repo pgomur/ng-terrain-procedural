@@ -6,7 +6,6 @@ import {
   FrustumPlanes,
   ChunkBounds,
   StreamingRequest,
-  ConcurrencySlot,
   WorldPosition,
 } from '../types/chunk';
 import { TerrainConfig, CameraState } from '../types/terrain';
@@ -19,6 +18,8 @@ import {
   intersectsFrustumAABB,
   isRenderableChunk,
   spatialKeyOf,
+  analyticHeightRange,
+  boundsFromHeights,
 } from '../math/chunk-coord';
 
 class CameraVelocityTracker {
@@ -248,65 +249,6 @@ export class StreamingPriorityQueue {
   }
 }
 
-class ConcurrencyPool {
-  private readonly slots = new Map<ChunkKey, ConcurrencySlot>();
-  private readonly maxSlots: number;
-  private readonly timeoutMs: number;
-
-  constructor(maxSlots: number, timeoutMs: number) {
-    this.maxSlots = maxSlots;
-    this.timeoutMs = timeoutMs;
-  }
-
-  get size(): number {
-    return this.slots.size;
-  }
-
-  canAccept(): boolean {
-    return this.slots.size < this.maxSlots;
-  }
-
-  has(key: ChunkKey): boolean {
-    return this.slots.has(key);
-  }
-
-  submit(key: ChunkKey, genFn: () => Promise<void>): boolean {
-    if (!this.canAccept() || this.slots.has(key)) return false;
-
-    const slot: { promise: Promise<void>; startedAt: number; settled: boolean } = {
-      promise: Promise.resolve(),
-      startedAt: performance.now(),
-      settled: false,
-    };
-    slot.promise = genFn().finally(() => {
-      slot.settled = true;
-    });
-
-    this.slots.set(key, slot);
-    return true;
-  }
-
-  tick(now: number, onTimeout: (key: ChunkKey) => void): void {
-    for (const [key, slot] of this.slots) {
-      if (slot.settled) {
-        this.slots.delete(key);
-      } else if (now - slot.startedAt > this.timeoutMs) {
-        this.slots.delete(key);
-        console.warn(`[ChunkManager] Slot timeout for chunk ${key} after ${this.timeoutMs}ms`);
-        onTimeout(key);
-      }
-    }
-  }
-
-  activeKeys(): IterableIterator<ChunkKey> {
-    return this.slots.keys();
-  }
-
-  clear(): void {
-    this.slots.clear();
-  }
-}
-
 const RETRY_BASE_MS = 250;
 const RETRY_MAX_MS = 8000;
 
@@ -314,16 +256,16 @@ function retryDelayMs(attempts: number): number {
   return Math.min(RETRY_BASE_MS * 2 ** Math.max(0, attempts - 1), RETRY_MAX_MS);
 }
 
+
 export interface ChunkManagerStats {
   readonly activeCount: number;
   readonly readyCount: number;
   readonly unloadingCount: number;
-  readonly generatingCount: number;
   readonly errorCount: number;
   readonly visibleCount: number;
   readonly pendingCount: number;
-  readonly concurrencySlots: number;
-  readonly storageBytes: number;
+  readonly exactBoundsCount: number;
+  readonly heightsCachedCount: number;
   readonly updateTimeMs: number;
   readonly streamingBufferUsage: number;
   readonly anticipationScore: number;
@@ -339,21 +281,19 @@ const MAX_LOD: ChunkLOD = 3;
 
 export class ChunkManager {
   private readonly config: TerrainConfig;
-  private readonly gpuGenerator: GPUGenerator;
+  private readonly gpuGenerator: GPUGenerator<Chunk>;
 
   private readonly chunks = new Map<ChunkKey, Chunk>();
   private readonly visibleKeys = new Set<ChunkKey>();
   private readonly releaseKeys = new Set<ChunkKey>();
   private readonly dirtyCoords = new Set<string>();
   private readonly visibilityToggled = new Set<ChunkKey>();
+  private readonly exactBounds = new WeakSet<Chunk>();
+  private readonly pendingHeights = new Set<Chunk>();
   private chunksChanged = true;
 
   private readonly velocityTracker = new CameraVelocityTracker(0.15);
   private readonly queue: StreamingPriorityQueue;
-  private readonly concurrencyPool: ConcurrencyPool;
-
-  private readonly inflight = new Map<ChunkKey, { token: number; attempts: number }>();
-  private nextGenerationToken = 1;
 
   private lastCameraPos = { x: Infinity, z: Infinity };
   private lastVelocityX = 0;
@@ -370,14 +310,18 @@ export class ChunkManager {
   private hasCamera = false;
   private lastUpdateTimeMs = 0;
 
-  constructor(config: TerrainConfig, gpuGenerator: GPUGenerator) {
+  private collisionChunkX = Number.NaN;
+  private collisionChunkZ = Number.NaN;
+  private collisionDirty = true;
+
+  constructor(config: TerrainConfig, gpuGenerator: GPUGenerator<Chunk>) {
     this.config = config;
     this.gpuGenerator = gpuGenerator;
     this.queue = new StreamingPriorityQueue(config.RING_BUFFER_CAPACITY);
-    this.concurrencyPool = new ConcurrencyPool(
-      config.MAX_CONCURRENT_GENERATIONS,
-      config.GENERATION_TIMEOUT_MS,
-    );
+    this.gpuGenerator.setListener({
+      onBounds: (chunk, minHeight, maxHeight) => this.applyExactBounds(chunk, minHeight, maxHeight),
+      onHeights: (chunk, heights) => this.applyHeights(chunk, heights),
+    });
   }
 
   getChunks(): ReadonlyMap<ChunkKey, Chunk> {
@@ -411,8 +355,6 @@ export class ChunkManager {
 
     this.velocityTracker.update(position.x, position.z, frameStart);
 
-    this.concurrencyPool.tick(frameStart, (key) => this.handleGenerationTimeout(key, frameStart));
-
     this.refreshDesiredChunks(position);
 
     this.cullAndRetry(frameStart);
@@ -420,7 +362,7 @@ export class ChunkManager {
 
     this.queue.retainOnly(this.desiredKeys);
 
-    this.enqueueNewChunks();
+    this.enqueueNewChunks(frameStart);
 
     const velChanged =
       Math.abs(this.velocityTracker.vx - this.lastVelocityX) > this.VELOCITY_CHANGE_THRESHOLD ||
@@ -441,7 +383,10 @@ export class ChunkManager {
       this.lastVelocityZ = this.velocityTracker.vz;
     }
 
-    this.drainQueue();
+    this.generateQueued(frameStart);
+    this.requestCollisionHeights(position);
+
+    this.gpuGenerator.flush();
 
     if (viewChanged || this.chunksChanged) {
       this.updateVisibility(frustum);
@@ -529,13 +474,10 @@ export class ChunkManager {
 
       if (isDesired) {
         if (chunk.state === 'unloading') {
-          if (chunk.gpu && chunk.geometryData) {
+          if (chunk.gpu) {
             chunk.state = 'ready';
             chunk.metrics.lastAccessed = now;
             this.markRenderChange(chunk);
-          } else if (this.inflight.has(key)) {
-            chunk.state = 'generating';
-            chunk.metrics.lastAccessed = now;
           } else {
             this.chunks.delete(key);
           }
@@ -589,16 +531,22 @@ export class ChunkManager {
     for (const key of this.releaseKeys) {
       const chunk = this.chunks.get(key);
       if (!chunk) continue;
-      if (chunk.gpu) {
-        this.gpuGenerator.releaseResources(chunk.gpu);
-        chunk.gpu = null;
-      }
-      if (isRenderableChunk(chunk)) this.markRenderChange(chunk);
-      this.chunks.delete(key);
-      if (this.visibleKeys.delete(key)) this.visibilityToggled.add(key);
+      this.releaseChunk(key, chunk);
     }
 
     this.releaseKeys.clear();
+  }
+
+  private releaseChunk(key: ChunkKey, chunk: Chunk): void {
+    if (isRenderableChunk(chunk)) this.markRenderChange(chunk);
+    if (chunk.gpu) {
+      this.gpuGenerator.release(chunk.gpu);
+      chunk.gpu = null;
+    }
+    chunk.heights = undefined;
+    this.pendingHeights.delete(chunk);
+    this.chunks.delete(key);
+    if (this.visibleKeys.delete(key)) this.visibilityToggled.add(key);
   }
 
   private markRenderChange(chunk: Chunk): void {
@@ -629,56 +577,51 @@ export class ChunkManager {
     };
   }
 
-  private enqueueNewChunks(): void {
-    const now = performance.now();
+  private enqueueNewChunks(now: number): void {
     for (const entry of this.desired) {
       const key = entry.key;
       if (this.chunks.has(key)) continue;
-      if (this.concurrencyPool.has(key)) continue;
       if (this.queue.has(key)) continue;
 
       this.queue.enqueue(this.createRequest(entry.coord, key, 0, now));
     }
   }
 
-  private drainQueue(): number {
-    const freeSlots = this.config.MAX_CONCURRENT_GENERATIONS - this.concurrencyPool.size;
-    const budget = Math.min(freeSlots, this.config.GENERATION_BUDGET);
+  private generateQueued(now: number): number {
+    const budget = Math.max(0, Math.floor(this.config.GENERATION_BUDGET));
 
-    let submitted = 0;
-    while (submitted < budget) {
+    let generated = 0;
+    while (generated < budget) {
       const req = this.queue.dequeue();
       if (!req) break;
 
-      const key = req.key;
-
       // Skip if already active or generating
-      if (this.chunks.has(key)) continue;
-      if (this.concurrencyPool.has(key)) continue;
+      if (this.chunks.has(req.key)) continue;
 
-      const token = this.nextGenerationToken++;
-      this.inflight.set(key, { token, attempts: req.attempts });
+      const chunk = this.buildChunk(req.coord, now);
+      this.chunks.set(req.key, chunk);
 
-      // Submit to pool — this starts the async GPU work
-      const accepted = this.concurrencyPool.submit(key, () =>
-        this.generateChunk(req.coord, key, token),
-      );
-
-      if (!accepted) {
-        this.inflight.delete(key);
-        this.queue.enqueue(req);
-        break;
+      try {
+        chunk.gpu = this.gpuGenerator.generate(req.coord, chunk);
+        chunk.state = 'ready';
+        this.markRenderChange(chunk);
+      } catch (error) {
+        const attempts = req.attempts + 1;
+        console.error(
+          `[ChunkManager] Error generating chunk ${req.key} (attempt ${attempts}):`,
+          error,
+        );
+        chunk.state = 'error';
+        chunk.failure = { attempts, retryAt: now + retryDelayMs(attempts) };
       }
 
-      this.chunks.set(key, this.buildPendingChunk(req.coord));
-      submitted++;
+      generated++;
     }
 
-    return submitted;
+    return generated;
   }
 
-  private buildPendingChunk(coord: ChunkCoord): Chunk {
-    const now = performance.now();
+  private buildChunk(coord: ChunkCoord, now: number): Chunk {
     return {
       meta: {
         coord,
@@ -691,7 +634,7 @@ export class ChunkManager {
         resolution: this.config.CHUNK_RESOLUTIONS[coord.lod],
         seed: this.config.NOISE_SEED,
       },
-      bounds: this.estimateBounds(coord),
+      bounds: this.analyticBounds(coord),
       state: 'generating',
       gpu: null,
       metrics: {
@@ -710,71 +653,66 @@ export class ChunkManager {
     };
   }
 
-  private async generateChunk(coord: ChunkCoord, key: ChunkKey, token: number): Promise<void> {
-    const genStart = performance.now();
+  private applyExactBounds(chunk: Chunk, minHeight: number, maxHeight: number): void {
+    if (this.chunks.get(getChunkKey(chunk.meta.coord)) !== chunk || !chunk.gpu) return;
 
-    let result: Awaited<ReturnType<GPUGenerator['generateChunk']>>;
-    try {
-      result = await this.gpuGenerator.generateChunk(coord);
-    } catch (error) {
-      const owner = this.inflight.get(key);
-      if (!owner || owner.token !== token) return;
-      this.inflight.delete(key);
-
-      const attempts = owner.attempts + 1;
-      console.error(`[ChunkManager] Error generating chunk ${key} (attempt ${attempts}):`, error);
-      this.markFailed(key, attempts, performance.now());
-      return;
-    }
-
-    const owner = this.inflight.get(key);
-    if (!owner || owner.token !== token) {
-      this.gpuGenerator.releaseResources(result.gpuResources);
-      return;
-    }
-    this.inflight.delete(key);
-
-    const chunk = this.chunks.get(key);
-    if (!chunk || (chunk.state !== 'generating' && chunk.state !== 'unloading')) {
-      this.gpuGenerator.releaseResources(result.gpuResources);
-      return;
-    }
-
-    const now = performance.now();
-    if (chunk.state === 'generating') {
-      chunk.state = 'ready';
-      chunk.metrics.lastAccessed = now;
-    }
-    chunk.bounds = result.bounds;
-    chunk.gpu = result.gpuResources;
-    chunk.geometryData = result.geometry;
-    chunk.failure = undefined;
-    chunk.metrics.generationTime = now - genStart;
-
-    if (isRenderableChunk(chunk)) this.markRenderChange(chunk);
+    chunk.bounds = boundsFromHeights(chunk.meta.coord, this.config.CHUNK_SIZE, minHeight, maxHeight);
+    chunk.metrics.generationTime = performance.now() - chunk.metrics.createdAt;
+    this.exactBounds.add(chunk);
+    this.chunksChanged = true;
   }
 
-  private handleGenerationTimeout(key: ChunkKey, now: number): void {
-    const owner = this.inflight.get(key);
-    if (!owner) return;
-    this.inflight.delete(key);
-    this.markFailed(key, owner.attempts + 1, now);
+  private applyHeights(chunk: Chunk, heights: Float32Array | null): void {
+    this.pendingHeights.delete(chunk);
+
+    if (!heights) {
+      this.collisionDirty = true;
+      return;
+    }
+    if (this.chunks.get(getChunkKey(chunk.meta.coord)) !== chunk || !chunk.gpu) return;
+
+    chunk.heights = heights;
   }
 
-  private markFailed(key: ChunkKey, attempts: number, now: number): void {
-    const chunk = this.chunks.get(key);
-    if (!chunk) return;
+  private requestCollisionHeights(position: WorldPosition): void {
+    const size = this.config.CHUNK_SIZE;
+    const chunkX = Math.floor(position.x / size);
+    const chunkZ = Math.floor(position.z / size);
 
-    if (isRenderableChunk(chunk)) this.markRenderChange(chunk);
-    if (chunk.gpu) {
-      this.gpuGenerator.releaseResources(chunk.gpu);
+    if (
+      chunkX === this.collisionChunkX &&
+      chunkZ === this.collisionChunkZ &&
+      !this.collisionDirty &&
+      this.dirtyCoords.size === 0
+    ) {
+      return;
     }
 
-    chunk.state = 'error';
-    chunk.gpu = null;
-    chunk.geometryData = undefined;
-    chunk.failure = { attempts, retryAt: now + retryDelayMs(attempts) };
-    if (this.visibleKeys.delete(key)) this.visibilityToggled.add(key);
+    this.collisionChunkX = chunkX;
+    this.collisionChunkZ = chunkZ;
+    this.collisionDirty = false;
+
+    for (let dz = -1; dz <= 1; dz++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const chunk = this.findSurfaceChunk(chunkX + dx, chunkZ + dz, false);
+        if (!chunk || !chunk.gpu || chunk.heights || this.pendingHeights.has(chunk)) continue;
+        if (this.gpuGenerator.requestHeights(chunk.gpu, chunk)) {
+          this.pendingHeights.add(chunk);
+        }
+      }
+    }
+  }
+
+  private findSurfaceChunk(chunkX: number, chunkZ: number, requireHeights: boolean): Chunk | undefined {
+    let fallback: Chunk | undefined;
+    for (let lod = 0; lod <= MAX_LOD; lod++) {
+      const chunk = this.chunks.get(`${chunkX}:${chunkZ}:${lod}` as ChunkKey);
+      if (!chunk || !chunk.gpu) continue;
+      if (requireHeights && !chunk.heights) continue;
+      if (chunk.state === 'ready') return chunk;
+      if (!fallback && chunk.state === 'unloading') fallback = chunk;
+    }
+    return fallback;
   }
 
   private updateVisibility(frustum: FrustumPlanes): void {
@@ -794,9 +732,9 @@ export class ChunkManager {
   getStats(): ChunkManagerStats {
     let readyCount = 0;
     let unloadingCount = 0;
-    let generatingCount = 0;
     let errorCount = 0;
-    let storageBytes = 0;
+    let exactBoundsCount = 0;
+    let heightsCachedCount = 0;
 
     for (const chunk of this.chunks.values()) {
       switch (chunk.state) {
@@ -806,18 +744,12 @@ export class ChunkManager {
         case 'unloading':
           unloadingCount++;
           break;
-        case 'generating':
-        case 'pending':
-          generatingCount++;
-          break;
         case 'error':
           errorCount++;
           break;
       }
-      if (chunk.gpu) {
-        const res = chunk.meta.resolution;
-        storageBytes += res * res * 4;
-      }
+      if (this.exactBounds.has(chunk)) exactBoundsCount++;
+      if (chunk.heights) heightsCachedCount++;
     }
 
     const capacity = this.config.RING_BUFFER_CAPACITY;
@@ -826,12 +758,11 @@ export class ChunkManager {
       activeCount: this.chunks.size,
       readyCount,
       unloadingCount,
-      generatingCount,
       errorCount,
       visibleCount: this.visibleKeys.size,
       pendingCount: this.queue.size,
-      concurrencySlots: this.concurrencyPool.size,
-      storageBytes,
+      exactBoundsCount,
+      heightsCachedCount,
       updateTimeMs: this.lastUpdateTimeMs,
       streamingBufferUsage: capacity > 0 ? this.queue.size / capacity : 0,
       anticipationScore: this.queue.avgAnticipationGain(),
@@ -843,18 +774,8 @@ export class ChunkManager {
     const chunkX = Math.floor(x / size);
     const chunkZ = Math.floor(z / size);
 
-    let target: Chunk | undefined;
-    for (let lod = 0; lod <= MAX_LOD; lod++) {
-      const chunk = this.chunks.get(`${chunkX}:${chunkZ}:${lod}` as ChunkKey);
-      if (!chunk || !chunk.geometryData) continue;
-      if (chunk.state === 'ready') {
-        target = chunk;
-        break;
-      }
-      if (!target && chunk.state === 'unloading') target = chunk;
-    }
-
-    if (!target || !target.geometryData) return null;
+    const target = this.findSurfaceChunk(chunkX, chunkZ, true);
+    if (!target || !target.heights) return null;
 
     const res = target.meta.resolution;
     const cellSize = size / (res - 1);
@@ -868,11 +789,11 @@ export class ChunkManager {
     const u = Math.min(Math.max(fx - gridX, 0), 1);
     const v = Math.min(Math.max(fz - gridZ, 0), 1);
 
-    const { positions } = target.geometryData;
-    const h00 = positions[(gridZ * res + gridX) * 3 + 1];
-    const h10 = positions[(gridZ * res + gridX + 1) * 3 + 1];
-    const h01 = positions[((gridZ + 1) * res + gridX) * 3 + 1];
-    const h11 = positions[((gridZ + 1) * res + gridX + 1) * 3 + 1];
+    const heights = target.heights;
+    const h00 = heights[gridZ * res + gridX];
+    const h10 = heights[gridZ * res + gridX + 1];
+    const h01 = heights[(gridZ + 1) * res + gridX];
+    const h11 = heights[(gridZ + 1) * res + gridX + 1];
 
     if (u + v <= 1) {
       return h00 + (h10 - h00) * u + (h01 - h00) * v;
@@ -881,49 +802,34 @@ export class ChunkManager {
   }
 
   clearAllChunks(): void {
-    for (const chunk of this.chunks.values()) {
-      if (chunk.gpu) {
-        this.gpuGenerator.releaseResources(chunk.gpu);
-        chunk.gpu = null;
-      }
-      if (isRenderableChunk(chunk)) this.markRenderChange(chunk);
+    for (const [key, chunk] of this.chunks) {
+      this.releaseChunk(key, chunk);
     }
     for (const key of this.visibleKeys) this.visibilityToggled.add(key);
 
     this.chunks.clear();
     this.visibleKeys.clear();
     this.releaseKeys.clear();
+    this.pendingHeights.clear();
     this.queue.clear();
-    this.concurrencyPool.clear();
-    this.inflight.clear();
     this.desired = [];
     this.desiredKeys.clear();
     this.desiredLODByCoord.clear();
     this.lastCameraPos = { x: Infinity, z: Infinity };
     this.velocityTracker.reset();
+    this.collisionChunkX = Number.NaN;
+    this.collisionChunkZ = Number.NaN;
+    this.collisionDirty = true;
     this.chunksChanged = true;
   }
 
   dispose(): void {
     this.clearAllChunks();
+    this.gpuGenerator.setListener(null);
   }
 
-  private estimateBounds(coord: ChunkCoord): ChunkBounds {
-    const originX = coord.x * this.config.CHUNK_SIZE;
-    const originZ = coord.z * this.config.CHUNK_SIZE;
-
-    const maxH = this.config.TERRAIN_HEIGHT_SCALE * 2.0 + this.config.TERRAIN_OFFSET_Y;
-    const minH = this.config.TERRAIN_OFFSET_Y - this.config.TERRAIN_HEIGHT_SCALE * 1.5;
-
-    return {
-      min: { x: originX, y: minH, z: originZ },
-      max: { x: originX + this.config.CHUNK_SIZE, y: maxH, z: originZ + this.config.CHUNK_SIZE },
-      center: {
-        x: originX + this.config.CHUNK_SIZE / 2,
-        y: (minH + maxH) / 2,
-        z: originZ + this.config.CHUNK_SIZE / 2,
-      },
-      radius: Math.sqrt(3 * Math.pow(this.config.CHUNK_SIZE / 2, 2) + Math.pow(maxH - minH, 2) / 2),
-    };
+  private analyticBounds(coord: ChunkCoord): ChunkBounds {
+    const range = analyticHeightRange(this.config.TERRAIN_HEIGHT_SCALE, this.config.TERRAIN_OFFSET_Y);
+    return boundsFromHeights(coord, this.config.CHUNK_SIZE, range.min, range.max);
   }
 }
