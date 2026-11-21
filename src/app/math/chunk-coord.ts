@@ -338,3 +338,53 @@ export function boundsFromHeights(
     radius: Math.sqrt(hx * hx * 2 + hy * hy),
   };
 }
+
+export function supportsSeamStitching(resolutions: Record<ChunkLOD, number>): boolean {
+  const base = resolutions[0] - 1;
+  if (base < 1) return false;
+  for (let lod = 1; lod <= 3; lod++) {
+    const segments = resolutions[lod as ChunkLOD] - 1;
+    if (segments < 1 || segments * 2 ** lod !== base) return false;
+  }
+  return true;
+}
+
+export function seamLodDiff(ownLod: ChunkLOD, neighborLod: ChunkLOD | null): number {
+  if (neighborLod === null) return 0;
+  return Math.max(0, Math.min(3, neighborLod - ownLod));
+}
+
+export function encodeSeamCode(left: number, right: number, top: number, bottom: number): number {
+  return (left & 3) | ((right & 3) << 2) | ((top & 3) << 4) | ((bottom & 3) << 6);
+}
+
+export function stitchedHeight(
+  heights: ArrayLike<number>,
+  resolution: number,
+  ix: number,
+  iz: number,
+  seamCode: number,
+): number {
+  const last = resolution - 1;
+  let h = heights[iz * resolution + ix];
+
+  const stitch = (diff: number, t: number, toIndex: (i: number) => number) => {
+    if (diff <= 0) return;
+    const step = 1 << diff;
+    const a = Math.floor(t / step) * step;
+    const b = Math.min(a + step, last);
+    const f = (t - a) / step;
+    h = heights[toIndex(a)] + (heights[toIndex(b)] - heights[toIndex(a)]) * f;
+  };
+
+  if (ix === 0) stitch(seamCode & 3, iz, (i) => i * resolution);
+  if (ix === last) stitch((seamCode >> 2) & 3, iz, (i) => i * resolution + last);
+  if (iz === 0) stitch((seamCode >> 4) & 3, ix, (i) => i);
+  if (iz === last) stitch((seamCode >> 6) & 3, ix, (i) => last * resolution + i);
+
+  return h;
+}
+
+export function skirtDepthFor(heightScale: number): number {
+  return Math.max(1, Math.abs(heightScale) * 0.02);
+}

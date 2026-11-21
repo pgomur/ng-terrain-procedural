@@ -1,10 +1,11 @@
 import { Injectable, NgZone, inject, signal, computed } from '@angular/core';
 import * as THREE from 'three';
 import { WebGPURenderer } from 'three/webgpu';
+import { color, fog, positionView, smoothstep, uniform } from 'three/tsl';
 
 import { ChunkManager } from './chunk-manager';
 import { GPUGenerator } from './gpu-generator';
-import { SceneGraph } from './scene-graph';
+import { SceneGraph, SHADOW_CASTER_LAYER } from './scene-graph';
 import {
   TerrainConfig,
   DEFAULT_TERRAIN_CONFIG,
@@ -35,6 +36,9 @@ type Mutable<T> = { -readonly [K in keyof T]: T[K] };
 
 const MAX_FRAME_DELTA_S = 0.1;
 const STATS_INTERVAL_MS = 250;
+const SHADOW_MAP_SIZE = 2048;
+const CAMERA_NEAR = 1;
+const SUN_DIRECTION = new THREE.Vector3(100, 200, 50).normalize();
 
 @Injectable()
 export class TerrainEngine {
@@ -85,6 +89,16 @@ export class TerrainEngine {
     normals: this.frustumNormals,
     constants: this.frustumConstants,
   };
+
+  private fogNear = 0;
+  private fogFar = 0;
+  private sun: THREE.DirectionalLight | null = null;
+  private readonly sunAxisX = new THREE.Vector3();
+  private readonly sunAxisY = new THREE.Vector3();
+  private readonly sunTarget = new THREE.Vector3();
+  private sunDistance = 0;
+  private shadowTexelSize = 1;
+  private shadowFootprintRadius = 0;
 
   private statsWindowStart = -1;
   private statsFrames = 0;
@@ -159,20 +173,35 @@ export class TerrainEngine {
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   }
 
+  private loadRadius(): number {
+    return Math.max(...this.config.LOD_DISTANCES) * 1.2;
+  }
+
+  private worldEdgeDistance(): number {
+    return this.loadRadius() - this.config.CHUNK_SIZE * Math.SQRT1_2;
+  }
+
   private initScene(): void {
     this.scene = new THREE.Scene();
-    this.scene.fog = new THREE.Fog(
-      0x87ceeb,
-      this.config.LOD_DISTANCES[1],
-      this.config.LOD_DISTANCES[2] * 1.5,
-    );
+
+    this.fogFar = this.worldEdgeDistance();
+    this.fogNear = Math.min(this.config.LOD_DISTANCES[1], this.fogFar * 0.5);
+
+    const distance = positionView.length();
+    Object.assign(this.scene, {
+      fogNode: fog(
+        color(0x87ceeb),
+        smoothstep(uniform(this.fogNear), uniform(this.fogFar), distance),
+      ),
+    });
   }
 
   private initCamera(): void {
     if (!this.canvas) return;
 
     const aspect = this.canvas.clientWidth / this.canvas.clientHeight;
-    this.camera = new THREE.PerspectiveCamera(60, aspect, 0.1, this.config.LOD_DISTANCES[2] * 2);
+    const far = this.loadRadius() + this.config.CHUNK_SIZE * Math.SQRT2;
+    this.camera = new THREE.PerspectiveCamera(60, aspect, CAMERA_NEAR, far);
 
     this.camera.position.set(0, 100, 0);
     this.camera.lookAt(0, 0, 100);
@@ -186,20 +215,64 @@ export class TerrainEngine {
     const ambient = new THREE.AmbientLight(0x404040, 0.5);
     this.scene.add(ambient);
 
+    const shadowRadius = this.config.LOD_DISTANCES[0];
+    const heightExtent =
+      Math.abs(this.config.TERRAIN_HEIGHT_SCALE) * 2 + Math.abs(this.config.TERRAIN_OFFSET_Y);
+
+    this.sunDistance = shadowRadius + heightExtent;
+    this.shadowTexelSize = (shadowRadius * 2) / SHADOW_MAP_SIZE;
+
+    this.sunAxisX.crossVectors(new THREE.Vector3(0, 1, 0), SUN_DIRECTION).normalize();
+    this.sunAxisY.crossVectors(SUN_DIRECTION, this.sunAxisX).normalize();
+
     const sun = new THREE.DirectionalLight(0xffffff, 1);
-    sun.position.set(100, 200, 50);
     sun.castShadow = true;
 
-    sun.shadow.mapSize.width = 2048;
-    sun.shadow.mapSize.height = 2048;
+    sun.shadow.mapSize.width = SHADOW_MAP_SIZE;
+    sun.shadow.mapSize.height = SHADOW_MAP_SIZE;
     sun.shadow.camera.near = 0.5;
-    sun.shadow.camera.far = 500;
-    sun.shadow.camera.left = -200;
-    sun.shadow.camera.right = 200;
-    sun.shadow.camera.top = 200;
-    sun.shadow.camera.bottom = -200;
+    sun.shadow.camera.far = this.sunDistance * 2;
+    sun.shadow.camera.left = -shadowRadius;
+    sun.shadow.camera.right = shadowRadius;
+    sun.shadow.camera.top = shadowRadius;
+    sun.shadow.camera.bottom = -shadowRadius;
+    sun.shadow.normalBias = this.shadowTexelSize;
+    sun.shadow.camera.layers.enable(SHADOW_CASTER_LAYER);
+    sun.shadow.camera.updateProjectionMatrix();
+
+    const elevation = Math.asin(SUN_DIRECTION.y);
+    this.shadowFootprintRadius =
+      shadowRadius / Math.sin(elevation) + heightExtent / Math.tan(elevation);
 
     this.scene.add(sun);
+    this.scene.add(sun.target);
+    this.sun = sun;
+    this.updateSun();
+  }
+
+  private updateSun(): void {
+    if (!this.sun || !this.camera) return;
+
+    const position = this.camera.position;
+    const texel = this.shadowTexelSize;
+    const u = Math.round(position.dot(this.sunAxisX) / texel) * texel;
+    const v = Math.round(position.dot(this.sunAxisY) / texel) * texel;
+    const w = position.dot(SUN_DIRECTION);
+
+    this.sunTarget
+      .copy(this.sunAxisX)
+      .multiplyScalar(u)
+      .addScaledVector(this.sunAxisY, v)
+      .addScaledVector(SUN_DIRECTION, w);
+
+    this.sun.target.position.copy(this.sunTarget);
+    this.sun.position.copy(this.sunTarget).addScaledVector(SUN_DIRECTION, this.sunDistance);
+
+    this.sceneGraph?.setShadowRegion(
+      position.x,
+      position.z,
+      this.shadowFootprintRadius + Math.abs(position.y) / Math.tan(Math.asin(SUN_DIRECTION.y)),
+    );
   }
 
   private prewarmPipelines(): void {
@@ -299,6 +372,8 @@ export class TerrainEngine {
       this.lastProjectionMatrix.copy(this.camera.projectionMatrix);
       this.viewInitialized = true;
     }
+
+    this.updateSun();
 
     this.chunkManager.update(this.cameraState!, this.frustumPlanes, viewChanged);
 
@@ -463,6 +538,7 @@ export class TerrainEngine {
     this.renderer = null;
 
     this.scene = null;
+    this.sun = null;
     this.camera = null;
     this.canvas = null;
     this.cameraState = null;

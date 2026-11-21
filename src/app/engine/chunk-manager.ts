@@ -20,6 +20,10 @@ import {
   spatialKeyOf,
   analyticHeightRange,
   boundsFromHeights,
+  supportsSeamStitching,
+  seamLodDiff,
+  encodeSeamCode,
+  stitchedHeight,
 } from '../math/chunk-coord';
 
 class CameraVelocityTracker {
@@ -314,8 +318,12 @@ export class ChunkManager {
   private collisionChunkZ = Number.NaN;
   private collisionDirty = true;
 
+  private readonly seamsEnabled: boolean;
+
   constructor(config: TerrainConfig, gpuGenerator: GPUGenerator<Chunk>) {
     this.config = config;
+    this.seamsEnabled =
+      config.SEAM_FITTING_ENABLED && supportsSeamStitching(config.CHUNK_RESOLUTIONS);
     this.gpuGenerator = gpuGenerator;
     this.queue = new StreamingPriorityQueue(config.RING_BUFFER_CAPACITY);
     this.gpuGenerator.setListener({
@@ -790,15 +798,29 @@ export class ChunkManager {
     const v = Math.min(Math.max(fz - gridZ, 0), 1);
 
     const heights = target.heights;
-    const h00 = heights[gridZ * res + gridX];
-    const h10 = heights[gridZ * res + gridX + 1];
-    const h01 = heights[(gridZ + 1) * res + gridX];
-    const h11 = heights[(gridZ + 1) * res + gridX + 1];
+    const seamCode = this.seamsEnabled ? this.seamCodeFor(target, chunkX, chunkZ) : 0;
+    const h00 = stitchedHeight(heights, res, gridX, gridZ, seamCode);
+    const h10 = stitchedHeight(heights, res, gridX + 1, gridZ, seamCode);
+    const h01 = stitchedHeight(heights, res, gridX, gridZ + 1, seamCode);
+    const h11 = stitchedHeight(heights, res, gridX + 1, gridZ + 1, seamCode);
 
     if (u + v <= 1) {
       return h00 + (h10 - h00) * u + (h01 - h00) * v;
     }
     return h11 + (h01 - h11) * (1 - u) + (h10 - h11) * (1 - v);
+  }
+
+  private seamCodeFor(chunk: Chunk, chunkX: number, chunkZ: number): number {
+    const lod = chunk.meta.coord.lod;
+    const neighborLod = (dx: number, dz: number): ChunkLOD | null =>
+      this.findSurfaceChunk(chunkX + dx, chunkZ + dz, false)?.meta.coord.lod ?? null;
+
+    return encodeSeamCode(
+      seamLodDiff(lod, neighborLod(-1, 0)),
+      seamLodDiff(lod, neighborLod(1, 0)),
+      seamLodDiff(lod, neighborLod(0, -1)),
+      seamLodDiff(lod, neighborLod(0, 1)),
+    );
   }
 
   clearAllChunks(): void {

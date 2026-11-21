@@ -12,7 +12,8 @@ import {
   storage,
   select,
   instanceIndex,
-  vertexIndex,
+  attribute,
+  vec4,
   positionLocal,
   floatBitsToUint,
   atomicMin,
@@ -219,13 +220,59 @@ export function createHeightKernels(options: HeightKernelOptions) {
   return { main, reset, jobCount, verticesPerChunk };
 }
 
-export function createHeightDisplacementNode(
+export function createTerrainPositionNode(
   heightsAttribute: StorageBufferAttribute,
   resolution: number,
-  slot: ReturnType<typeof uniform>,
+  skirtDepth: number,
 ) {
   const heights = storage(heightsAttribute, 'float', heightsAttribute.count).toReadOnly();
-  const index = int(slot).mul(int(resolution * resolution)).add(int(vertexIndex));
 
-  return vec3(positionLocal.x, heights.element(index), positionLocal.z);
+  return Fn(() => {
+    const data = vec4(attribute('instanceData', 'vec4'));
+    const res = int(resolution);
+    const last = int(resolution - 1);
+    const base = int(data.z).mul(int(resolution * resolution));
+    const code = int(data.w);
+    const index = int(attribute('heightIndex', 'float'));
+    const gx = index.mod(res);
+    const gz = index.div(res);
+
+    const height = float(heights.element(base.add(index))).toVar();
+
+    const stitch = (
+      diff: ReturnType<typeof int>,
+      t: ReturnType<typeof int>,
+      toIndex: (i: ReturnType<typeof int>) => ReturnType<typeof int>,
+    ) => {
+      If(diff.greaterThan(int(0)), () => {
+        const step = int(1).shiftLeft(diff);
+        const a = t.div(step).mul(step);
+        const next = a.add(step);
+        const b = int(select(next.greaterThan(last), last, next));
+        const f = float(t.sub(a)).div(float(step));
+        const ha = float(heights.element(base.add(toIndex(a))));
+        const hb = float(heights.element(base.add(toIndex(b))));
+        height.assign(ha.add(hb.sub(ha).mul(f)));
+      });
+    };
+
+    If(gx.equal(int(0)), () => {
+      stitch(code.bitAnd(int(3)), gz, (i) => i.mul(res));
+    });
+    If(gx.equal(last), () => {
+      stitch(code.shiftRight(int(2)).bitAnd(int(3)), gz, (i) => i.mul(res).add(last));
+    });
+    If(gz.equal(int(0)), () => {
+      stitch(code.shiftRight(int(4)).bitAnd(int(3)), gx, (i) => i);
+    });
+    If(gz.equal(last), () => {
+      stitch(code.shiftRight(int(6)).bitAnd(int(3)), gx, (i) => last.mul(res).add(i));
+    });
+
+    return vec3(
+      positionLocal.x.add(data.x),
+      height.add(positionLocal.y.mul(skirtDepth)),
+      positionLocal.z.add(data.y),
+    );
+  })();
 }

@@ -18,6 +18,14 @@ const DEFAULT_MAX_STORAGE_BINDING_BYTES = 128 * 1024 * 1024;
 const LODS: readonly ChunkLOD[] = [0, 1, 2, 3];
 
 const MAX_POOLED_STAGING_PER_SIZE = 4;
+const MAX_POOLED_STAGING_TOTAL = 16;
+const MIN_STAGING_BYTES = 256;
+
+function stagingBucket(byteLength: number): number {
+  let size = MIN_STAGING_BYTES;
+  while (size < byteLength) size *= 2;
+  return size;
+}
 
 export interface HeightListener<TOwner> {
   onBounds(owner: TOwner, minHeight: number, maxHeight: number): void;
@@ -381,17 +389,18 @@ export class GPUGenerator<TOwner = unknown> {
       return full.slice(byteOffset, byteOffset + byteLength);
     }
 
-    const staging = this.acquireStaging(device, byteLength);
+    const bucket = stagingBucket(byteLength);
+    const staging = this.acquireStaging(device, bucket);
     const encoder = device.createCommandEncoder();
     encoder.copyBufferToBuffer(source, byteOffset, staging, 0, byteLength);
     device.queue.submit([encoder.finish()]);
 
     try {
-      await staging.mapAsync(GPUMapMode.READ);
-      return staging.getMappedRange().slice(0);
+      await staging.mapAsync(GPUMapMode.READ, 0, byteLength);
+      return staging.getMappedRange(0, byteLength).slice(0);
     } finally {
       if (staging.mapState === 'mapped') staging.unmap();
-      this.releaseStaging(byteLength, staging);
+      this.releaseStaging(bucket, staging);
     }
   }
 
@@ -411,7 +420,10 @@ export class GPUGenerator<TOwner = unknown> {
       pool = [];
       this.stagingPool.set(size, pool);
     }
-    if (pool.length < MAX_POOLED_STAGING_PER_SIZE) {
+    let pooledTotal = 0;
+    for (const list of this.stagingPool.values()) pooledTotal += list.length;
+
+    if (pool.length < MAX_POOLED_STAGING_PER_SIZE && pooledTotal < MAX_POOLED_STAGING_TOTAL) {
       pool.push(buffer);
     } else {
       buffer.destroy();
