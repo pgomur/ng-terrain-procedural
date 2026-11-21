@@ -12,7 +12,7 @@ interface Owner {
   readonly meta: { readonly coord: ChunkCoord };
 }
 
-export class FakeHeightGenerator {
+export class CpuHeightGenerator {
   readonly live = new Map<number, ChunkGPUResources>();
   readonly attempts = new Map<ChunkKey, number>();
   readonly failHeightsOnce = new Set<ChunkKey>();
