@@ -1,50 +1,55 @@
 <div class="terrain-viewport">
   <canvas #terrainCanvas></canvas>
 
-  @if (showDiagnostics && engine.state().isReady) {
+  @if (showDiagnostics && engine.isReady()) {
+    @let stats = engine.stats();
     <div class="engine-diagnostics">
       <div class="diagnostic-panel">
         <h3>WebGPU Terrain Engine</h3>
         <div class="metric-row">
           <span class="label">FPS</span>
-          <span class="value" [class.warning]="engine.state().fps < 30">
-            {{ engine.state().fps | number: '1.0-0' }}
+          <span class="value" [class.warning]="(stats?.fps ?? 0) < 30">
+            {{ stats?.fps ?? 0 | number: '1.0-0' }}
           </span>
         </div>
         <div class="metric-row">
+          <span class="label">CPU Frame</span>
+          <span class="value">{{ stats?.cpuFrameMs ?? 0 | number: '1.1-1' }} ms</span>
+        </div>
+        <div class="metric-row">
           <span class="label">Visible Chunks</span>
-          <span class="value">{{ engine.chunkState()?.stats?.visibleCount || 0 }}</span>
+          <span class="value">{{ stats?.visibleChunks ?? 0 }}</span>
         </div>
         <div class="metric-row">
           <span class="label">Total in Memory</span>
-          <span class="value">{{ engine.chunkState()?.stats?.readyCount || 0 }}</span>
+          <span class="value">{{ stats?.readyChunks ?? 0 }}</span>
         </div>
         <div class="metric-row">
           <span class="label">Generating GPU</span>
-          <span class="value">{{ engine.chunkState()?.stats?.generatingCount || 0 }}</span>
+          <span class="value">{{ stats?.generatingChunks ?? 0 }}</span>
         </div>
         <div class="metric-row">
           <span class="label">Pending Queue</span>
-          <span class="value">{{ engine.chunkState()?.stats?.pendingCount || 0 }}</span>
+          <span class="value">{{ stats?.pendingChunks ?? 0 }}</span>
         </div>
-        @if (engine.chunkState()?.stats?.totalVRAM !== undefined) {
+        @if (stats) {
           <div class="metric-row vram-metric">
             <span class="label">VRAM Estimated</span>
             <span class="value">
-              {{ engine.chunkState()!.stats.totalVRAM / 1048576 | number: '1.1-2' }} MB
+              {{ stats.estimatedVRAMBytes / 1048576 | number: '1.1-2' }} MB
             </span>
           </div>
         }
         <div class="metric-row coord-metric">
           <span class="label">Coordinates (X, Y, Z)</span>
           <span class="value coord-value">
-            {{ currentX | number: '1.0-0' }} : {{ currentY | number: '1.0-0' }} :
-            {{ currentZ | number: '1.0-0' }}
+            {{ stats?.cameraX ?? 0 | number: '1.0-0' }} : {{ stats?.cameraY ?? 0 | number: '1.0-0' }} :
+            {{ stats?.cameraZ ?? 0 | number: '1.0-0' }}
           </span>
         </div>
         <div class="metric-row">
           <span class="label">Speed</span>
-          <span class="value">{{ currentSpeed | number: '1.0-0' }} u/s</span>
+          <span class="value">{{ stats?.cameraSpeed ?? 0 | number: '1.0-0' }} u/s</span>
         </div>
       </div>
       <div class="controls-hint">
@@ -53,14 +58,14 @@
     </div>
   }
 
-  @if (engine.state().initState === 'initializing') {
+  @if (engine.initState() === 'initializing') {
     <div class="loading-overlay">
       <div class="spinner"></div>
       <p>Initializing WebGPU pipeline...</p>
     </div>
   }
 
-  @if (engine.state().initState === 'failed') {
+  @if (engine.initState() === 'failed') {
     <div class="error-overlay">
       <div class="error-message">
         <h3>Critical Hardware Error</h3>
@@ -72,7 +77,7 @@
     </div>
   }
 
-  @if (isPointerLocked) {
+  @if (isPointerLocked()) {
     <div class="precision-crosshair">
       <svg viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg">
         <g class="crosshair-axes">

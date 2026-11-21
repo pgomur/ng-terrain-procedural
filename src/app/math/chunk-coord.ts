@@ -1,4 +1,5 @@
 import type {
+  Chunk,
   ChunkCoord,
   ChunkKey,
   ChunkLOD,
@@ -289,4 +290,12 @@ export function getIndexCountForResolution(resolution: number): number {
  */
 export function getVertexCountForResolution(resolution: number): number {
   return resolution * resolution;
+}
+
+export function spatialKeyOf(coord: { readonly x: number; readonly z: number }): string {
+  return `${coord.x}:${coord.z}`;
+}
+
+export function isRenderableChunk(chunk: Chunk): boolean {
+  return (chunk.state === 'ready' || chunk.state === 'unloading') && chunk.geometryData !== undefined;
 }

@@ -109,8 +109,8 @@ export interface ChunkGPUResources {
 export interface ChunkMetrics {
   // Timing
   readonly createdAt: number;
-  readonly generationTime: number;
-  readonly lastAccessed: number;
+  generationTime: number;
+  lastAccessed: number;
   readonly frameCount: number;
 
   // Distance and priority
@@ -134,7 +134,7 @@ export interface ChunkMetrics {
  */
 export interface Chunk {
   readonly meta: ChunkMeta;
-  readonly bounds: ChunkBounds;
+  bounds: ChunkBounds;
 
   state: ChunkState;
   gpu: ChunkGPUResources | null;
@@ -150,32 +150,6 @@ export interface Chunk {
 export interface ChunkFailure {
   readonly attempts: number;
   readonly retryAt: number;
-}
-
-/**
- * Global state of the chunk system
- * Immutable for Signals
- */
-export interface ChunkSystemState {
-  readonly activeChunks: ReadonlyMap<ChunkKey, Chunk>;
-  readonly visibleKeys: ReadonlySet<ChunkKey>;
-  readonly generatingKeys: ReadonlySet<ChunkKey>;
-  readonly cameraChunk: ChunkCoord | null;
-  readonly submissionCounter: number;
-
-  readonly stats: {
-    readonly totalVRAM: number;
-    readonly visibleCount: number;
-    readonly pendingCount: number;
-    readonly generatingCount: number;
-    readonly readyCount: number;
-    readonly fps: number;
-    readonly gpuWaitTime: number;
-    // Streaming buffer metrics
-    readonly streamingBufferUsage: number; // ringSize / capacity [0..1]
-    readonly anticipationScore: number; // avg predicted gain from velocity
-    readonly concurrencySlots: number; // active GPU generation promises
-  };
 }
 
 // Streaming System Types

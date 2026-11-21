@@ -1,15 +1,25 @@
 import * as THREE from 'three';
 import { vec3, smoothstep, positionWorld, fract, uniform, mix, fwidth, float } from 'three/tsl';
-import { Chunk, ChunkKey } from '../types/chunk';
+import { Chunk, ChunkKey, ChunkLOD } from '../types/chunk';
 import { TerrainConfig } from '../types/terrain';
-import { getChunkKey } from '../math/chunk-coord';
+import { getChunkKey, isRenderableChunk } from '../math/chunk-coord';
+
+interface CoordEntry {
+  readonly chunkKey: ChunkKey;
+  readonly mesh: THREE.Mesh;
+  readonly resolution: number;
+  readonly source: Float32Array;
+}
+
+const MAX_POOLED_MESHES_PER_RESOLUTION = 32;
+const LODS: readonly ChunkLOD[] = [0, 1, 2, 3];
 
 export class SceneGraph {
   private readonly scene: THREE.Scene;
   private readonly config: TerrainConfig;
 
-  private activeMeshes = new Map<ChunkKey, THREE.Mesh>();
-  private geometryPool = new Map<number, THREE.BufferGeometry[]>();
+  private readonly entries = new Map<string, CoordEntry>();
+  private readonly meshPool = new Map<number, THREE.Mesh[]>();
   private terrainMaterial: THREE.MeshStandardMaterial | null = null;
 
   constructor(scene: THREE.Scene, config: TerrainConfig) {
@@ -63,66 +73,150 @@ export class SceneGraph {
     (this.terrainMaterial as any).colorNode = mix(baseColor, baseColor.mul(0.75), gridFactor);
   }
 
-  addOrUpdateChunk(chunk: Chunk): void {
-    const key = getChunkKey(chunk.meta.coord);
+  sync(
+    chunks: ReadonlyMap<ChunkKey, Chunk>,
+    visibleKeys: ReadonlySet<ChunkKey>,
+    dirtyCoords: ReadonlySet<string>,
+    visibilityToggled: ReadonlySet<ChunkKey>,
+  ): void {
+    for (const spatialKey of dirtyCoords) {
+      this.syncCoord(spatialKey, chunks, visibleKeys);
+    }
 
-    if (this.activeMeshes.has(key)) {
+    for (const key of visibilityToggled) {
+      const entry = this.entries.get(key.slice(0, key.lastIndexOf(':')));
+      if (entry && entry.chunkKey === key) {
+        entry.mesh.visible = visibleKeys.has(key);
+      }
+    }
+  }
+
+  get meshCount(): number {
+    return this.entries.size;
+  }
+
+  getGeometryBytes(): number {
+    let bytes = 0;
+    for (const entry of this.entries.values()) {
+      bytes += this.geometryBytes(entry.resolution);
+    }
+    for (const [resolution, pool] of this.meshPool) {
+      bytes += this.geometryBytes(resolution) * pool.length;
+    }
+    return bytes;
+  }
+
+  private geometryBytes(resolution: number): number {
+    return resolution * resolution * 12 + (resolution - 1) * (resolution - 1) * 6 * 2;
+  }
+
+  private syncCoord(
+    spatialKey: string,
+    chunks: ReadonlyMap<ChunkKey, Chunk>,
+    visibleKeys: ReadonlySet<ChunkKey>,
+  ): void {
+    const best = this.selectBest(spatialKey, chunks);
+    const entry = this.entries.get(spatialKey);
+
+    if (!best || !best.geometryData) {
+      if (entry) this.releaseEntry(spatialKey, entry);
       return;
     }
 
-    const mesh = this.createChunkMesh(chunk);
-    if (!mesh) return;
+    const chunkKey = getChunkKey(best.meta.coord);
+    const source = best.geometryData.positions;
 
-    mesh.position.set(chunk.meta.worldOrigin.x, 0, chunk.meta.worldOrigin.z);
+    if (entry && entry.chunkKey === chunkKey && entry.source === source) {
+      entry.mesh.visible = visibleKeys.has(chunkKey);
+      return;
+    }
 
-    this.scene.add(mesh);
-    this.activeMeshes.set(key, mesh);
+    const resolution = best.meta.resolution;
+    let mesh: THREE.Mesh;
+
+    if (entry && entry.resolution === resolution) {
+      mesh = entry.mesh;
+    } else {
+      if (entry) this.releaseEntry(spatialKey, entry);
+      mesh = this.acquireMesh(resolution);
+      this.scene.add(mesh);
+    }
+
+    this.writeGeometry(mesh.geometry, best);
+
+    mesh.position.set(best.meta.worldOrigin.x, 0, best.meta.worldOrigin.z);
+    mesh.updateMatrix();
+    mesh.visible = visibleKeys.has(chunkKey);
+
+    this.entries.set(spatialKey, { chunkKey, mesh, resolution, source });
   }
 
-  private createChunkMesh(chunk: Chunk): THREE.Mesh | null {
-    if (!chunk.gpu) return null;
+  private selectBest(spatialKey: string, chunks: ReadonlyMap<ChunkKey, Chunk>): Chunk | null {
+    let best: Chunk | null = null;
+    for (const lod of LODS) {
+      const chunk = chunks.get(`${spatialKey}:${lod}` as ChunkKey);
+      if (!chunk || !isRenderableChunk(chunk)) continue;
+      if (!best || (chunk.state === 'ready' && best.state !== 'ready')) {
+        best = chunk;
+      }
+    }
+    return best;
+  }
 
-    const geometry = this.getOrCreateGeometry(chunk);
-    if (!geometry) return null;
+  private writeGeometry(geometry: THREE.BufferGeometry, chunk: Chunk): void {
+    const data = chunk.geometryData!;
+    const positions = geometry.attributes['position'] as THREE.BufferAttribute;
+    (positions.array as Float32Array).set(data.positions);
+    positions.needsUpdate = true;
+
+    const size = chunk.meta.size;
+    const box = geometry.boundingBox ?? new THREE.Box3();
+    box.min.set(0, data.bounds.minHeight, 0);
+    box.max.set(size, data.bounds.maxHeight, size);
+    geometry.boundingBox = box;
+
+    const sphere = geometry.boundingSphere ?? new THREE.Sphere();
+    box.getBoundingSphere(sphere);
+    geometry.boundingSphere = sphere;
+  }
+
+  private acquireMesh(resolution: number): THREE.Mesh {
+    const pooled = this.meshPool.get(resolution);
+    if (pooled && pooled.length > 0) {
+      return pooled.pop()!;
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute(
+      'position',
+      new THREE.BufferAttribute(new Float32Array(resolution * resolution * 3), 3),
+    );
+    geometry.setIndex(new THREE.BufferAttribute(this.generateIndices(resolution), 1));
 
     const mesh = new THREE.Mesh(geometry, this.terrainMaterial || undefined);
-
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     mesh.frustumCulled = true;
-
-    (mesh as any).chunkKey = getChunkKey(chunk.meta.coord);
-    (mesh as any).chunkBounds = chunk.bounds;
+    mesh.matrixAutoUpdate = false;
 
     return mesh;
   }
 
-  private getOrCreateGeometry(chunk: Chunk): THREE.BufferGeometry | null {
-    if (!chunk.geometryData) return null;
+  private releaseEntry(spatialKey: string, entry: CoordEntry): void {
+    this.scene.remove(entry.mesh);
+    this.entries.delete(spatialKey);
 
-    const resolution = chunk.meta.resolution;
-    const pooled = this.geometryPool.get(resolution);
-    let geometry: THREE.BufferGeometry;
-
-    if (pooled && pooled.length > 0) {
-      geometry = pooled.pop()!;
-    } else {
-      geometry = new THREE.BufferGeometry();
-      geometry.setAttribute(
-        'position',
-        new THREE.BufferAttribute(new Float32Array(chunk.geometryData.positions.length), 3),
-      );
-      geometry.setIndex(new THREE.BufferAttribute(this.generateIndices(resolution), 1));
+    let pool = this.meshPool.get(entry.resolution);
+    if (!pool) {
+      pool = [];
+      this.meshPool.set(entry.resolution, pool);
     }
 
-    const positions = geometry.attributes['position'] as THREE.BufferAttribute;
-    positions.array.set(chunk.geometryData.positions);
-    positions.needsUpdate = true;
-
-    geometry.computeBoundingSphere();
-    geometry.computeBoundingBox();
-
-    return geometry;
+    if (pool.length < MAX_POOLED_MESHES_PER_RESOLUTION) {
+      pool.push(entry.mesh);
+    } else {
+      entry.mesh.geometry.dispose();
+    }
   }
 
   private generateIndices(res: number): Uint16Array {
@@ -145,35 +239,16 @@ export class SceneGraph {
     return indices;
   }
 
-  cleanupInactive(chunksToKeep: Map<ChunkKey, Chunk>): void {
-    const keysToRemove: ChunkKey[] = [];
-    for (const key of this.activeMeshes.keys()) {
-      if (!chunksToKeep.has(key)) keysToRemove.push(key);
-    }
-    for (const key of keysToRemove) {
-      const mesh = this.activeMeshes.get(key);
-      if (mesh) {
-        this.scene.remove(mesh);
-        this.activeMeshes.delete(key);
-        const res = Math.sqrt(mesh.geometry.attributes['position'].count);
-        if (!this.geometryPool.has(res)) this.geometryPool.set(res, []);
-        this.geometryPool.get(res)!.push(mesh.geometry);
-      }
-    }
-  }
-
-  update(frameTime: number): void {}
-
   dispose(): void {
-    for (const mesh of this.activeMeshes.values()) {
-      this.scene.remove(mesh);
-      mesh.geometry.dispose();
+    for (const entry of this.entries.values()) {
+      this.scene.remove(entry.mesh);
+      entry.mesh.geometry.dispose();
     }
-    this.activeMeshes.clear();
-    for (const geometries of this.geometryPool.values()) {
-      for (const geometry of geometries) geometry.dispose();
+    this.entries.clear();
+    for (const pool of this.meshPool.values()) {
+      for (const mesh of pool) mesh.geometry.dispose();
     }
-    this.geometryPool.clear();
+    this.meshPool.clear();
     if (this.terrainMaterial) this.terrainMaterial.dispose();
   }
 }

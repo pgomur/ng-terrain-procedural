@@ -10,12 +10,18 @@ import {
   Input,
   Output,
   EventEmitter,
+  signal,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import * as THREE from 'three';
 import { TerrainEngine } from '../engine/terrain-engine';
 import { TerrainConfig } from '../types/terrain';
 import { TERRAIN_CONFIG } from './terrain.config';
+
+const MOUSE_SENSITIVITY = 0.002;
+const PITCH_LIMIT = Math.PI / 2 - 0.01;
+const SPRINT_MULTIPLIER = 3.0;
+const EYE_HEIGHT = 5.0;
 
 @Component({
   selector: 'app-terrain',
@@ -39,20 +45,17 @@ export class TerrainComponent implements OnInit, AfterViewInit, OnDestroy {
   private readonly globalConfig = inject(TERRAIN_CONFIG);
   private readonly ngZone = inject(NgZone);
 
-  public isPointerLocked = false;
+  public readonly isPointerLocked = signal(false);
   private cameraPitch = 0;
   private cameraYaw = 0;
-  private cameraPosition = new THREE.Vector3(0, 100, 500);
-  private movementSpeed = 30.0;
+  private readonly cameraPosition = new THREE.Vector3(0, 100, 500);
+  private readonly movementSpeed = 30.0;
 
-  public currentX = 0;
-  public currentY = 100;
-  public currentZ = 500;
-  public currentSpeed = 0;
+  private readonly forward = new THREE.Vector3();
+  private readonly right = new THREE.Vector3();
+  private readonly lookTarget = new THREE.Vector3();
 
-  private activeKeys = new Set<string>();
-  private lastTime = 0;
-  private animationFrameId?: number;
+  private readonly activeKeys = new Set<string>();
 
   private cleanupFunctions: (() => void)[] = [];
 
@@ -75,19 +78,12 @@ export class TerrainComponent implements OnInit, AfterViewInit, OnDestroy {
         this.cameraPosition.z,
       );
       this.engine.lookAt(0, 0, 0);
+      this.syncOrientationFromEngine();
 
       this.ngZone.runOutsideAngular(() => {
-        this.engine.start();
         this.setupFlyCameraControls(canvas);
-
-        this.lastTime = performance.now();
-        const runUpdateLoop = (time: number) => {
-          const delta = (time - this.lastTime) / 1000;
-          this.lastTime = time;
-          this.updateCameraLogic(delta);
-          this.animationFrameId = requestAnimationFrame(runUpdateLoop);
-        };
-        this.animationFrameId = requestAnimationFrame(runUpdateLoop);
+        this.engine.setFrameCallback((delta) => this.updateCameraLogic(delta));
+        this.engine.start();
       });
 
       this.engineReady.emit(true);
@@ -98,9 +94,7 @@ export class TerrainComponent implements OnInit, AfterViewInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
-    if (this.animationFrameId !== undefined) {
-      cancelAnimationFrame(this.animationFrameId);
-    }
+    this.engine.setFrameCallback(null);
 
     this.cleanupFunctions.forEach((cleanupFn) => cleanupFn());
     this.cleanupFunctions = [];
@@ -108,23 +102,28 @@ export class TerrainComponent implements OnInit, AfterViewInit, OnDestroy {
     this.engine.dispose();
   }
 
+  private syncOrientationFromEngine(): void {
+    const direction = this.engine.getCameraDirection(this.forward);
+    this.cameraPitch = Math.asin(THREE.MathUtils.clamp(-direction.y, -1, 1));
+    this.cameraYaw = Math.atan2(-direction.x, -direction.z);
+    this.cameraPitch = THREE.MathUtils.clamp(this.cameraPitch, -PITCH_LIMIT, PITCH_LIMIT);
+  }
+
   private setupFlyCameraControls(canvas: HTMLCanvasElement): void {
     const onKeydown = (e: KeyboardEvent) => this.activeKeys.add(e.code);
     const onKeyup = (e: KeyboardEvent) => this.activeKeys.delete(e.code);
 
     const onMousemove = (e: MouseEvent) => {
-      if (!this.isPointerLocked) return;
+      if (!this.isPointerLocked()) return;
 
-      const sensitivity = 0.002;
-      this.cameraYaw -= e.movementX * sensitivity;
-      this.cameraPitch += e.movementY * sensitivity;
+      this.cameraYaw -= e.movementX * MOUSE_SENSITIVITY;
+      this.cameraPitch += e.movementY * MOUSE_SENSITIVITY;
 
-      const pitchLimit = Math.PI / 2 - 0.01;
-      this.cameraPitch = Math.max(-pitchLimit, Math.min(pitchLimit, this.cameraPitch));
+      this.cameraPitch = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, this.cameraPitch));
     };
 
     const onClick = async () => {
-      if (!this.isPointerLocked) {
+      if (!this.isPointerLocked()) {
         try {
           if (canvas.requestPointerLock) {
             await canvas.requestPointerLock();
@@ -136,8 +135,9 @@ export class TerrainComponent implements OnInit, AfterViewInit, OnDestroy {
     };
 
     const onPointerLockChange = () => {
-      this.isPointerLocked = document.pointerLockElement === canvas;
-      if (!this.isPointerLocked) {
+      const locked = document.pointerLockElement === canvas;
+      this.isPointerLocked.set(locked);
+      if (!locked) {
         this.activeKeys.clear();
       }
     };
@@ -158,29 +158,26 @@ export class TerrainComponent implements OnInit, AfterViewInit, OnDestroy {
   }
 
   private updateCameraLogic(delta: number): void {
-    if (!this.isPointerLocked) return;
+    if (!this.isPointerLocked()) return;
 
     const moveDistance =
-      this.movementSpeed * delta * (this.activeKeys.has('ShiftLeft') ? 3.0 : 1.0);
+      this.movementSpeed * delta * (this.activeKeys.has('ShiftLeft') ? SPRINT_MULTIPLIER : 1.0);
 
-    const forward = new THREE.Vector3(
-      Math.sin(this.cameraYaw) * Math.cos(this.cameraPitch),
-      Math.sin(this.cameraPitch),
-      Math.cos(this.cameraYaw) * Math.cos(this.cameraPitch),
-    )
-      .negate()
+    const cosPitch = Math.cos(this.cameraPitch);
+    this.forward
+      .set(
+        -Math.sin(this.cameraYaw) * cosPitch,
+        -Math.sin(this.cameraPitch),
+        -Math.cos(this.cameraYaw) * cosPitch,
+      )
       .normalize();
 
-    const right = new THREE.Vector3(
-      Math.cos(this.cameraYaw),
-      0,
-      -Math.sin(this.cameraYaw),
-    ).normalize();
+    this.right.set(Math.cos(this.cameraYaw), 0, -Math.sin(this.cameraYaw)).normalize();
 
-    if (this.activeKeys.has('KeyW')) this.cameraPosition.addScaledVector(forward, moveDistance);
-    if (this.activeKeys.has('KeyS')) this.cameraPosition.addScaledVector(forward, -moveDistance);
-    if (this.activeKeys.has('KeyD')) this.cameraPosition.addScaledVector(right, moveDistance);
-    if (this.activeKeys.has('KeyA')) this.cameraPosition.addScaledVector(right, -moveDistance);
+    if (this.activeKeys.has('KeyW')) this.cameraPosition.addScaledVector(this.forward, moveDistance);
+    if (this.activeKeys.has('KeyS')) this.cameraPosition.addScaledVector(this.forward, -moveDistance);
+    if (this.activeKeys.has('KeyD')) this.cameraPosition.addScaledVector(this.right, moveDistance);
+    if (this.activeKeys.has('KeyA')) this.cameraPosition.addScaledVector(this.right, -moveDistance);
 
     if (this.activeKeys.has('Space')) this.cameraPosition.y += moveDistance;
     if (this.activeKeys.has('ControlLeft')) this.cameraPosition.y -= moveDistance;
@@ -191,8 +188,7 @@ export class TerrainComponent implements OnInit, AfterViewInit, OnDestroy {
     );
 
     if (terrainHeight !== null) {
-      const eyeHeight = 5.0;
-      const groundY = terrainHeight + eyeHeight;
+      const groundY = terrainHeight + EYE_HEIGHT;
 
       if (this.cameraPosition.y < groundY) {
         this.cameraPosition.y = groundY;
@@ -205,12 +201,7 @@ export class TerrainComponent implements OnInit, AfterViewInit, OnDestroy {
       this.cameraPosition.z,
     );
 
-    const target = this.cameraPosition.clone().add(forward);
-    this.engine.lookAt(target.x, target.y, target.z);
-
-    this.currentX = this.cameraPosition.x;
-    this.currentY = this.cameraPosition.y;
-    this.currentZ = this.cameraPosition.z;
-    this.currentSpeed = this.activeKeys.size > 0 ? moveDistance / delta : 0;
+    this.lookTarget.copy(this.cameraPosition).add(this.forward);
+    this.engine.lookAt(this.lookTarget.x, this.lookTarget.y, this.lookTarget.z);
   }
 }

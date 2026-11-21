@@ -1,4 +1,4 @@
-import { Injectable, NgZone, inject, signal, computed, Injector } from '@angular/core';
+import { Injectable, NgZone, inject, signal, computed } from '@angular/core';
 import * as THREE from 'three';
 import { WebGPURenderer } from 'three/webgpu';
 
@@ -11,13 +11,33 @@ import {
   EngineInitState,
   CameraState,
 } from '../types/terrain';
-import { ChunkSystemState, FrustumPlanes, Chunk, ChunkKey, WorldPosition } from '../types/chunk';
-import { getChunkKey } from '../math/chunk-coord';
+import { FrustumPlanes, WorldPosition } from '../types/chunk';
+
+export interface TerrainEngineStats {
+  readonly fps: number;
+  readonly cpuFrameMs: number;
+  readonly chunkUpdateMs: number;
+  readonly visibleChunks: number;
+  readonly readyChunks: number;
+  readonly generatingChunks: number;
+  readonly pendingChunks: number;
+  readonly estimatedVRAMBytes: number;
+  readonly cameraX: number;
+  readonly cameraY: number;
+  readonly cameraZ: number;
+  readonly cameraSpeed: number;
+}
+
+export type FrameCallback = (deltaSeconds: number) => void;
+
+type Mutable<T> = { -readonly [K in keyof T]: T[K] };
+
+const MAX_FRAME_DELTA_S = 0.1;
+const STATS_INTERVAL_MS = 250;
 
 @Injectable()
 export class TerrainEngine {
   private readonly ngZone = inject(NgZone);
-  private readonly injector = inject(Injector);
 
   private config: TerrainConfig = DEFAULT_TERRAIN_CONFIG;
 
@@ -31,38 +51,52 @@ export class TerrainEngine {
   private raycaster = new THREE.Raycaster();
   private centerMouse = new THREE.Vector2(0, 0);
 
-  private initState = signal<EngineInitState>('uninitialized');
-  private frameCount = signal<number>(0);
-  private lastFrameTime = signal<number>(0);
+  private readonly initStateSignal = signal<EngineInitState>('uninitialized');
+  private readonly statsSignal = signal<TerrainEngineStats | null>(null);
+
+  readonly initState = this.initStateSignal.asReadonly();
+  readonly isReady = computed(() => this.initStateSignal() === 'ready');
+  readonly stats = this.statsSignal.asReadonly();
+
   private isRunning = false;
   private animationId: number | null = null;
+  private lastLoopTime = -1;
+  private frameCallback: FrameCallback | null = null;
 
   private canvas: HTMLCanvasElement | null = null;
   private resizeObserver: ResizeObserver | null = null;
 
-  private lastCameraMatrix = new THREE.Matrix4();
-  private lastCameraState: CameraState | null = null;
-  private lastFrustum: FrustumPlanes | null = null;
-  private readonly EPSILON = 0.0001;
-
-  readonly state = computed(() => ({
-    initState: this.initState(),
-    frameCount: this.frameCount(),
-    fps: 1000 / (this.lastFrameTime() || 16),
-    isReady: this.initState() === 'ready',
+  private viewInitialized = false;
+  private readonly lastCameraMatrix = new THREE.Matrix4();
+  private readonly lastProjectionMatrix = new THREE.Matrix4();
+  private readonly viewProjection = new THREE.Matrix4();
+  private readonly frustum = new THREE.Frustum();
+  private readonly forward = new THREE.Vector3();
+  private readonly right = new THREE.Vector3();
+  private cameraState: Mutable<CameraState> | null = null;
+  private readonly frustumNormals: Mutable<WorldPosition>[] = Array.from({ length: 6 }, () => ({
+    x: 0,
+    y: 0,
+    z: 0,
   }));
+  private readonly frustumConstants: number[] = [0, 0, 0, 0, 0, 0];
+  private readonly frustumPlanes: FrustumPlanes = {
+    normals: this.frustumNormals,
+    constants: this.frustumConstants,
+  };
 
-  readonly chunkState = computed<ChunkSystemState | null>(() => {
-    return this.chunkManager?.getChunkSystemState()() ?? null;
-  });
+  private statsWindowStart = -1;
+  private statsFrames = 0;
+  private statsCpuMs = 0;
+  private readonly statsStartPosition = new THREE.Vector3();
 
   async init(canvas: HTMLCanvasElement, customConfig?: Partial<TerrainConfig>): Promise<boolean> {
-    if (this.initState() !== 'uninitialized') {
+    if (this.initStateSignal() !== 'uninitialized') {
       console.warn('TerrainEngine already initialized');
       return true;
     }
 
-    this.initState.set('initializing');
+    this.initStateSignal.set('initializing');
     this.canvas = canvas;
 
     if (customConfig) {
@@ -81,13 +115,13 @@ export class TerrainEngine {
 
       this.setupResizeHandling();
 
-      this.initState.set('ready');
+      this.initStateSignal.set('ready');
       console.log('TerrainEngine initialized successfully');
 
       return true;
     } catch (error) {
       console.error('Error initializing TerrainEngine:', error);
-      this.initState.set('failed');
+      this.initStateSignal.set('failed');
       return false;
     }
   }
@@ -140,7 +174,6 @@ export class TerrainEngine {
     this.camera.lookAt(0, 0, 100);
 
     this.camera.updateMatrixWorld();
-    this.lastCameraMatrix.copy(this.camera.matrixWorld);
   }
 
   private initLights(): void {
@@ -165,45 +198,6 @@ export class TerrainEngine {
     this.scene.add(sun);
   }
 
-  private syncSceneGraph(): void {
-    const state = this.chunkManager?.getChunkSystemState()();
-    if (!state || !this.sceneGraph) return;
-
-    const bestChunksByCoord = new Map<string, Chunk>();
-
-    for (const [key, chunk] of state.activeChunks) {
-      const spatialKey = `${chunk.meta.coord.x}:${chunk.meta.coord.z}`;
-      const existing = bestChunksByCoord.get(spatialKey);
-
-      const isRenderable = chunk.state === 'ready' || chunk.state === 'unloading';
-      if (!isRenderable) continue;
-
-      if (!state.visibleKeys.has(key)) continue;
-
-      if (!existing) {
-        bestChunksByCoord.set(spatialKey, chunk);
-      } else {
-        const currentIsBetterState = chunk.state === 'ready' && existing.state !== 'ready';
-        const sameStateBetterLOD =
-          chunk.state === existing.state && chunk.meta.coord.lod < existing.meta.coord.lod;
-
-        if (currentIsBetterState || sameStateBetterLOD) {
-          bestChunksByCoord.set(spatialKey, chunk);
-        }
-      }
-    }
-
-    const chunksToKeep = new Map<ChunkKey, Chunk>();
-
-    for (const chunk of bestChunksByCoord.values()) {
-      const key = getChunkKey(chunk.meta.coord) as ChunkKey;
-      chunksToKeep.set(key, chunk);
-      this.sceneGraph.addOrUpdateChunk(chunk);
-    }
-
-    this.sceneGraph.cleanupInactive(chunksToKeep);
-  }
-
   private setupResizeHandling(): void {
     if (!this.canvas) return;
 
@@ -218,20 +212,26 @@ export class TerrainEngine {
   }
 
   private handleResize(width: number, height: number): void {
-    if (!this.camera || !this.renderer) return;
+    if (!this.camera || !this.renderer || width <= 0 || height <= 0) return;
 
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height, false);
   }
 
+  setFrameCallback(callback: FrameCallback | null): void {
+    this.frameCallback = callback;
+  }
+
   start(): void {
-    if (this.isRunning || this.initState() !== 'ready') return;
+    if (this.isRunning || this.initStateSignal() !== 'ready') return;
 
     this.isRunning = true;
+    this.lastLoopTime = -1;
+    this.statsWindowStart = -1;
 
     this.ngZone.runOutsideAngular(() => {
-      this.renderLoop();
+      this.animationId = requestAnimationFrame(this.renderLoop);
     });
   }
 
@@ -243,99 +243,171 @@ export class TerrainEngine {
     }
   }
 
-  private renderLoop = (): void => {
+  private renderLoop = (time: number): void => {
     if (!this.isRunning) return;
 
-    const startTime = performance.now();
+    const delta =
+      this.lastLoopTime < 0
+        ? 0
+        : Math.min(Math.max((time - this.lastLoopTime) / 1000, 0), MAX_FRAME_DELTA_S);
+    this.lastLoopTime = time;
 
-    this.update(startTime);
+    const cpuStart = performance.now();
+
+    this.frameCallback?.(delta);
+    this.update();
 
     if (this.renderer && this.scene && this.camera) {
       this.renderer.render(this.scene, this.camera);
     }
 
-    const frameTime = performance.now() - startTime;
-    this.lastFrameTime.set(frameTime);
-    this.frameCount.update((n) => n + 1);
+    this.recordFrame(time, performance.now() - cpuStart);
 
     this.animationId = requestAnimationFrame(this.renderLoop);
   };
 
-  private update(frameTime: number): void {
-    if (!this.camera || !this.chunkManager) return;
+  private update(): void {
+    if (!this.camera || !this.chunkManager || !this.sceneGraph) return;
 
     this.camera.updateMatrixWorld(true);
 
-    const cameraMoved = !this.camera.matrixWorld.equals(this.lastCameraMatrix);
+    const viewChanged =
+      !this.viewInitialized ||
+      !this.camera.matrixWorld.equals(this.lastCameraMatrix) ||
+      !this.camera.projectionMatrix.equals(this.lastProjectionMatrix);
 
-    if (cameraMoved || !this.lastCameraState || !this.lastFrustum) {
-      const camState = this.buildCameraState();
-      const frustum = this.extractFrustumPlanes();
-
-      this.lastCameraState = camState;
-      this.lastFrustum = frustum;
+    if (viewChanged) {
+      this.refreshCameraState();
+      this.refreshFrustumPlanes();
       this.lastCameraMatrix.copy(this.camera.matrixWorld);
-
-      this.chunkManager.update(camState, frustum);
-    } else {
-      this.chunkManager.update(this.lastCameraState, this.lastFrustum);
+      this.lastProjectionMatrix.copy(this.camera.projectionMatrix);
+      this.viewInitialized = true;
     }
 
-    this.syncSceneGraph();
-    this.sceneGraph?.update(frameTime);
+    this.chunkManager.update(this.cameraState!, this.frustumPlanes, viewChanged);
+
+    this.sceneGraph.sync(
+      this.chunkManager.getChunks(),
+      this.chunkManager.getVisibleKeys(),
+      this.chunkManager.getDirtyCoords(),
+      this.chunkManager.getVisibilityToggled(),
+    );
+    this.chunkManager.clearRenderChanges();
   }
 
-  private buildCameraState(): CameraState {
-    if (!this.camera) throw new Error('Camera not initialized');
+  private refreshCameraState(): void {
+    const camera = this.camera!;
 
-    return {
-      position: this.camera.position,
-      forward: new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion),
-      up: this.camera.up,
-      right: new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion),
-      fov: THREE.MathUtils.degToRad(this.camera.fov),
-      aspect: this.camera.aspect,
-      near: this.camera.near,
-      far: this.camera.far,
-      viewMatrix: new Float32Array(this.camera.matrixWorldInverse.elements),
-      projectionMatrix: new Float32Array(this.camera.projectionMatrix.elements),
-      viewProjectionMatrix: new Float32Array(
-        new THREE.Matrix4().multiplyMatrices(
-          this.camera.projectionMatrix,
-          this.camera.matrixWorldInverse,
-        ).elements,
-      ),
-    };
+    this.forward.set(0, 0, -1).applyQuaternion(camera.quaternion);
+    this.right.set(1, 0, 0).applyQuaternion(camera.quaternion);
+    this.viewProjection.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+
+    if (!this.cameraState) {
+      this.cameraState = {
+        position: camera.position,
+        forward: this.forward,
+        up: camera.up,
+        right: this.right,
+        fov: 0,
+        aspect: 0,
+        near: 0,
+        far: 0,
+        viewMatrix: new Float32Array(16),
+        projectionMatrix: new Float32Array(16),
+        viewProjectionMatrix: new Float32Array(16),
+      };
+    }
+
+    const state = this.cameraState;
+    state.fov = THREE.MathUtils.degToRad(camera.fov);
+    state.aspect = camera.aspect;
+    state.near = camera.near;
+    state.far = camera.far;
+    state.viewMatrix.set(camera.matrixWorldInverse.elements);
+    state.projectionMatrix.set(camera.projectionMatrix.elements);
+    state.viewProjectionMatrix.set(this.viewProjection.elements);
   }
 
   /**
    * Extracts the frustum planes of the current camera.
    * Uses Three.js native infrastructure for robustness with WebGPU.
    */
-  private extractFrustumPlanes(): FrustumPlanes {
-    if (!this.camera) throw new Error('Camera not initialized');
+  private refreshFrustumPlanes(): void {
+    const camera = this.camera!;
 
-    const frustum = new THREE.Frustum();
-    const projScreenMatrix = new THREE.Matrix4().multiplyMatrices(
-      this.camera.projectionMatrix,
-      this.camera.matrixWorldInverse,
+    this.frustum.setFromProjectionMatrix(
+      this.viewProjection,
+      camera.coordinateSystem,
+      camera.reversedDepth,
     );
-    frustum.setFromProjectionMatrix(projScreenMatrix);
-
-    const normals: WorldPosition[] = [];
-    const constants: number[] = [];
 
     for (let i = 0; i < 6; i++) {
-      const plane = frustum.planes[i];
-      normals.push({ x: plane.normal.x, y: plane.normal.y, z: plane.normal.z });
-      constants.push(plane.constant);
+      const plane = this.frustum.planes[i];
+      const normal = this.frustumNormals[i];
+      normal.x = plane.normal.x;
+      normal.y = plane.normal.y;
+      normal.z = plane.normal.z;
+      this.frustumConstants[i] = plane.constant;
+    }
+  }
+
+  private recordFrame(time: number, cpuMs: number): void {
+    if (!this.camera) return;
+
+    if (this.statsWindowStart < 0) {
+      this.statsWindowStart = time;
+      this.statsFrames = 0;
+      this.statsCpuMs = 0;
+      this.statsStartPosition.copy(this.camera.position);
+      return;
     }
 
-    return { normals, constants };
+    this.statsFrames++;
+    this.statsCpuMs += cpuMs;
+
+    const elapsed = time - this.statsWindowStart;
+    if (elapsed < STATS_INTERVAL_MS) return;
+
+    this.publishStats(elapsed);
+
+    this.statsWindowStart = time;
+    this.statsFrames = 0;
+    this.statsCpuMs = 0;
+    this.statsStartPosition.copy(this.camera.position);
+  }
+
+  private publishStats(elapsedMs: number): void {
+    if (!this.camera || !this.chunkManager) return;
+
+    const chunkStats = this.chunkManager.getStats();
+    const position = this.camera.position;
+
+    this.statsSignal.set({
+      fps: (this.statsFrames * 1000) / elapsedMs,
+      cpuFrameMs: this.statsFrames > 0 ? this.statsCpuMs / this.statsFrames : 0,
+      chunkUpdateMs: chunkStats.updateTimeMs,
+      visibleChunks: chunkStats.visibleCount,
+      readyChunks: chunkStats.readyCount,
+      generatingChunks: chunkStats.generatingCount,
+      pendingChunks: chunkStats.pendingCount,
+      estimatedVRAMBytes:
+        chunkStats.storageBytes +
+        (this.sceneGraph?.getGeometryBytes() ?? 0) +
+        (this.gpuGenerator?.getPooledBytes() ?? 0),
+      cameraX: position.x,
+      cameraY: position.y,
+      cameraZ: position.z,
+      cameraSpeed: position.distanceTo(this.statsStartPosition) / (elapsedMs / 1000),
+    });
   }
 
   setCameraPosition(x: number, y: number, z: number): void {
     this.camera?.position.set(x, y, z);
+  }
+
+  getCameraDirection(target: THREE.Vector3): THREE.Vector3 {
+    if (!this.camera) return target.set(0, 0, -1);
+    return this.camera.getWorldDirection(target);
   }
 
   getTerrainHeightAt(x: number, z: number): number | null {
@@ -355,6 +427,7 @@ export class TerrainEngine {
 
   dispose(): void {
     this.stop();
+    this.frameCallback = null;
 
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
@@ -374,7 +447,10 @@ export class TerrainEngine {
     this.scene = null;
     this.camera = null;
     this.canvas = null;
+    this.cameraState = null;
+    this.viewInitialized = false;
 
-    this.initState.set('uninitialized');
+    this.statsSignal.set(null);
+    this.initStateSignal.set('uninitialized');
   }
 }

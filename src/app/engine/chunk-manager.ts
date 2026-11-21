@@ -1,28 +1,24 @@
-import { signal, computed, Signal, untracked } from '@angular/core';
-
 import {
   Chunk,
   ChunkCoord,
-  ChunkState,
   ChunkKey,
-  ChunkSystemState,
   ChunkLOD,
   FrustumPlanes,
   ChunkBounds,
-  ChunkMetrics,
   StreamingRequest,
   ConcurrencySlot,
+  WorldPosition,
 } from '../types/chunk';
-import { TerrainConfig, CameraState, PerformanceSnapshot } from '../types/terrain';
+import { TerrainConfig, CameraState } from '../types/terrain';
 import { GPUGenerator } from './gpu-generator';
 import {
   getChunkKey,
   distanceToChunk,
   selectLODForDistance,
-  calculateNeighborMask,
   getChunkCenter,
-  worldToChunkCoord,
   intersectsFrustumAABB,
+  isRenderableChunk,
+  spatialKeyOf,
 } from '../math/chunk-coord';
 
 class CameraVelocityTracker {
@@ -318,25 +314,39 @@ function retryDelayMs(attempts: number): number {
   return Math.min(RETRY_BASE_MS * 2 ** Math.max(0, attempts - 1), RETRY_MAX_MS);
 }
 
+export interface ChunkManagerStats {
+  readonly activeCount: number;
+  readonly readyCount: number;
+  readonly unloadingCount: number;
+  readonly generatingCount: number;
+  readonly errorCount: number;
+  readonly visibleCount: number;
+  readonly pendingCount: number;
+  readonly concurrencySlots: number;
+  readonly storageBytes: number;
+  readonly updateTimeMs: number;
+  readonly streamingBufferUsage: number;
+  readonly anticipationScore: number;
+}
+
+interface DesiredChunk {
+  readonly coord: ChunkCoord;
+  readonly key: ChunkKey;
+}
+
+const UNLOAD_FRAME_MS = 16;
+const MAX_LOD: ChunkLOD = 3;
+
 export class ChunkManager {
   private readonly config: TerrainConfig;
   private readonly gpuGenerator: GPUGenerator;
 
-  private activeChunks = signal<Map<ChunkKey, Chunk>>(new Map());
-  private visibleKeys = signal<Set<ChunkKey>>(new Set());
-  private cameraChunk = signal<ChunkCoord | null>(null);
-  private submissionCounter = signal<number>(0);
-
-  private perfStats = signal<PerformanceSnapshot>({
-    timestamp: 0,
-    frameTimeMs: 0,
-    gpuTimeMs: 0,
-    chunksRendered: 0,
-    chunksVisible: 0,
-    trianglesDrawn: 0,
-    drawCalls: 0,
-    memoryGPU: 0,
-  });
+  private readonly chunks = new Map<ChunkKey, Chunk>();
+  private readonly visibleKeys = new Set<ChunkKey>();
+  private readonly releaseKeys = new Set<ChunkKey>();
+  private readonly dirtyCoords = new Set<string>();
+  private readonly visibilityToggled = new Set<ChunkKey>();
+  private chunksChanged = true;
 
   private readonly velocityTracker = new CameraVelocityTracker(0.15);
   private readonly queue: StreamingPriorityQueue;
@@ -350,12 +360,15 @@ export class ChunkManager {
   private lastVelocityZ = 0;
   private readonly VELOCITY_CHANGE_THRESHOLD = 5; // world-units/s
 
-  private cachedDesiredChunks: ChunkCoord[] = [];
+  private desired: DesiredChunk[] = [];
+  private readonly desiredKeys = new Set<ChunkKey>();
+  private readonly desiredLODByCoord = new Map<string, ChunkLOD>();
   private readonly CACHE_THRESHOLD = 0.1;
 
-  private currentCamera: CameraState | null = null;
-  private currentFrustum: FrustumPlanes | null = null;
-  private needsNeighborUpdate = false;
+  private cameraX = 0;
+  private cameraZ = 0;
+  private hasCamera = false;
+  private lastUpdateTimeMs = 0;
 
   constructor(config: TerrainConfig, gpuGenerator: GPUGenerator) {
     this.config = config;
@@ -367,36 +380,47 @@ export class ChunkManager {
     );
   }
 
-  update(camera: CameraState, frustum: FrustumPlanes): void {
+  getChunks(): ReadonlyMap<ChunkKey, Chunk> {
+    return this.chunks;
+  }
+
+  getVisibleKeys(): ReadonlySet<ChunkKey> {
+    return this.visibleKeys;
+  }
+
+  getDirtyCoords(): ReadonlySet<string> {
+    return this.dirtyCoords;
+  }
+
+  getVisibilityToggled(): ReadonlySet<ChunkKey> {
+    return this.visibilityToggled;
+  }
+
+  clearRenderChanges(): void {
+    this.dirtyCoords.clear();
+    this.visibilityToggled.clear();
+  }
+
+  update(camera: CameraState, frustum: FrustumPlanes, viewChanged = true): void {
     const frameStart = performance.now();
+    const position = camera.position;
 
-    this.currentCamera = camera;
-    this.currentFrustum = frustum;
+    this.cameraX = position.x;
+    this.cameraZ = position.z;
+    this.hasCamera = true;
 
-    this.velocityTracker.update(camera.position.x, camera.position.z, frameStart);
+    this.velocityTracker.update(position.x, position.z, frameStart);
 
     this.concurrencyPool.tick(frameStart, (key) => this.handleGenerationTimeout(key, frameStart));
 
-    const camChunkCoord = worldToChunkCoord(camera.position, this.config.CHUNK_SIZE, 0 as ChunkLOD);
-    this.cameraChunk.set(camChunkCoord);
-    const desiredChunks = this.getDesiredChunksCached(camera);
+    this.refreshDesiredChunks(position);
 
-    const desiredSpatialCoords = new Map<string, number>();
-    for (const c of desiredChunks) {
-      desiredSpatialCoords.set(`${c.x}:${c.z}`, c.lod);
-    }
-    const desiredKeys = new Set(desiredChunks.map((c) => getChunkKey(c)));
+    this.cullAndRetry(frameStart);
+    this.releasePendingKeys();
 
-    const mutations = this.collectCullMutations(
-      this.activeChunks(),
-      desiredKeys,
-      desiredSpatialCoords,
-      frameStart,
-    );
+    this.queue.retainOnly(this.desiredKeys);
 
-    this.queue.retainOnly(desiredKeys);
-
-    this.enqueueNewChunks(desiredChunks, mutations.chunksAfterCull);
+    this.enqueueNewChunks();
 
     const velChanged =
       Math.abs(this.velocityTracker.vx - this.lastVelocityX) > this.VELOCITY_CHANGE_THRESHOLD ||
@@ -404,8 +428,8 @@ export class ChunkManager {
 
     if (velChanged || this.queue.size > 0) {
       this.queue.reprioritize(
-        camera.position.x,
-        camera.position.z,
+        position.x,
+        position.z,
         this.velocityTracker.vx,
         this.velocityTracker.vz,
         this.velocityTracker.speed,
@@ -417,46 +441,40 @@ export class ChunkManager {
       this.lastVelocityZ = this.velocityTracker.vz;
     }
 
-    if (this.drainQueue(mutations.chunksAfterCull) > 0) {
-      mutations.hasChanges = true;
+    this.drainQueue();
+
+    if (viewChanged || this.chunksChanged) {
+      this.updateVisibility(frustum);
+      this.chunksChanged = false;
     }
 
-    this.applyMutations(mutations);
-
-    this.updateVisibilityFast(this.activeChunks(), frustum);
-
-    if (this.needsNeighborUpdate) {
-      this.updateNeighborMasks(this.activeChunks());
-      this.needsNeighborUpdate = false;
-    }
-
-    const frameTime = performance.now() - frameStart;
-    this.perfStats.update((stats) => ({
-      ...stats,
-      timestamp: performance.now(),
-      frameTimeMs: frameTime,
-      chunksVisible: this.visibleKeys().size,
-    }));
+    this.lastUpdateTimeMs = performance.now() - frameStart;
   }
 
-  private getDesiredChunksCached(camera: CameraState): ChunkCoord[] {
-    const dx = Math.abs(camera.position.x - this.lastCameraPos.x);
-    const dz = Math.abs(camera.position.z - this.lastCameraPos.z);
+  private refreshDesiredChunks(position: WorldPosition): void {
+    const dx = Math.abs(position.x - this.lastCameraPos.x);
+    const dz = Math.abs(position.z - this.lastCameraPos.z);
     const threshold = this.config.CHUNK_SIZE * this.CACHE_THRESHOLD;
 
-    if (dx < threshold && dz < threshold && this.cachedDesiredChunks.length > 0) {
-      return this.cachedDesiredChunks;
+    if (dx < threshold && dz < threshold && this.desired.length > 0) {
+      return;
     }
 
-    this.lastCameraPos = { x: camera.position.x, z: camera.position.z };
-    this.cachedDesiredChunks = this.calculateDesiredChunks(camera);
-    return this.cachedDesiredChunks;
+    this.lastCameraPos = { x: position.x, z: position.z };
+    this.desired = this.calculateDesiredChunks(position);
+
+    this.desiredKeys.clear();
+    this.desiredLODByCoord.clear();
+    for (const entry of this.desired) {
+      this.desiredKeys.add(entry.key);
+      this.desiredLODByCoord.set(spatialKeyOf(entry.coord), entry.coord.lod);
+    }
   }
 
-  private calculateDesiredChunks(camera: CameraState): ChunkCoord[] {
-    const desired: ChunkCoord[] = [];
-    const centerX = Math.floor(camera.position.x / this.config.CHUNK_SIZE);
-    const centerZ = Math.floor(camera.position.z / this.config.CHUNK_SIZE);
+  private calculateDesiredChunks(position: WorldPosition): DesiredChunk[] {
+    const desired: DesiredChunk[] = [];
+    const centerX = Math.floor(position.x / this.config.CHUNK_SIZE);
+    const centerZ = Math.floor(position.z / this.config.CHUNK_SIZE);
 
     const maxDist = Math.max(...this.config.LOD_DISTANCES) * 1.2;
     const radius = Math.ceil(maxDist / this.config.CHUNK_SIZE);
@@ -473,11 +491,12 @@ export class ChunkManager {
         const chunkX = centerX + x;
         const chunkZ = centerZ + z;
         const center = getChunkCenter({ x: chunkX, z: chunkZ, lod: 0 }, this.config.CHUNK_SIZE);
-        const dist = distanceToChunk(camera.position, center);
+        const dist = distanceToChunk(position, center);
 
         if (dist < maxDist) {
           const lod = selectLODForDistance(dist, this.config.LOD_DISTANCES);
-          desired.push({ x: chunkX, z: chunkZ, lod });
+          const coord: ChunkCoord = { x: chunkX, z: chunkZ, lod };
+          desired.push({ coord, key: getChunkKey(coord) });
         }
       }
 
@@ -491,29 +510,19 @@ export class ChunkManager {
     return desired;
   }
 
-  private collectCullMutations(
-    currentChunks: Map<ChunkKey, Chunk>,
-    desiredKeys: Set<ChunkKey>,
-    desiredSpatialCoords: Map<string, number>,
-    now: number,
-  ): { chunksAfterCull: Map<ChunkKey, Chunk>; keysToRelease: ChunkKey[]; hasChanges: boolean } {
-    const working = new Map(currentChunks);
-    const keysToRelease: ChunkKey[] = [];
-    let hasChanges = false;
-
-    for (const [key, chunk] of currentChunks) {
-      const isDesired = desiredKeys.has(key);
+  private cullAndRetry(now: number): void {
+    for (const [key, chunk] of this.chunks) {
+      const isDesired = this.desiredKeys.has(key);
 
       if (chunk.state === 'error') {
         if (!isDesired) {
-          keysToRelease.push(key);
+          this.releaseKeys.add(key);
           continue;
         }
         const failure = chunk.failure;
         if (!failure || now >= failure.retryAt) {
-          working.delete(key);
-          hasChanges = true;
-          this.queue.enqueue(this.createRequest(chunk.meta.coord, key, failure?.attempts ?? 1));
+          this.chunks.delete(key);
+          this.queue.enqueue(this.createRequest(chunk.meta.coord, key, failure?.attempts ?? 1, now));
         }
         continue;
       }
@@ -521,99 +530,118 @@ export class ChunkManager {
       if (isDesired) {
         if (chunk.state === 'unloading') {
           if (chunk.gpu && chunk.geometryData) {
-            working.set(key, {
-              ...chunk,
-              state: 'ready',
-              metrics: { ...chunk.metrics, lastAccessed: now },
-            });
+            chunk.state = 'ready';
+            chunk.metrics.lastAccessed = now;
+            this.markRenderChange(chunk);
           } else if (this.inflight.has(key)) {
-            working.set(key, {
-              ...chunk,
-              state: 'generating',
-              metrics: { ...chunk.metrics, lastAccessed: now },
-            });
+            chunk.state = 'generating';
+            chunk.metrics.lastAccessed = now;
           } else {
-            working.delete(key);
+            this.chunks.delete(key);
           }
-          hasChanges = true;
         }
         continue;
       }
 
-      const spatialKey = `${chunk.meta.coord.x}:${chunk.meta.coord.z}`;
-      const desiredLOD = desiredSpatialCoords.get(spatialKey);
+      const desiredLOD = this.desiredLODByCoord.get(spatialKeyOf(chunk.meta.coord));
 
       if (desiredLOD !== undefined) {
-        const replacementKey =
-          `${chunk.meta.coord.x}:${chunk.meta.coord.z}:${desiredLOD}` as ChunkKey;
-        const replacement = working.get(replacementKey);
+        const replacement = this.chunks.get(
+          `${chunk.meta.coord.x}:${chunk.meta.coord.z}:${desiredLOD}` as ChunkKey,
+        );
         if (!replacement || replacement.state !== 'ready') {
-          working.set(key, {
-            ...chunk,
-            metrics: { ...chunk.metrics, lastAccessed: now },
-          });
+          chunk.metrics.lastAccessed = now;
           continue;
         }
       }
 
       if (chunk.state === 'unloading') {
-        const framesPassed = (now - chunk.metrics.lastAccessed) / 16;
+        const framesPassed = (now - chunk.metrics.lastAccessed) / UNLOAD_FRAME_MS;
         if (framesPassed > this.config.UNLOAD_DELAY_FRAMES) {
-          keysToRelease.push(key);
+          this.releaseKeys.add(key);
         }
       } else {
-        working.set(key, {
-          ...chunk,
-          state: 'unloading',
-          metrics: { ...chunk.metrics, lastAccessed: now },
-        });
-        hasChanges = true;
+        const wasRenderable = isRenderableChunk(chunk);
+        chunk.state = 'unloading';
+        chunk.metrics.lastAccessed = now;
+        if (wasRenderable) this.markRenderChange(chunk);
       }
     }
 
     // Evict excess if over MAX_CHUNKS
-    if (working.size > this.config.MAX_CHUNKS) {
-      const candidates = Array.from(working.entries())
-        .filter(([, c]) => c.state === 'unloading')
-        .sort((a, b) => a[1].metrics.lastAccessed - b[1].metrics.lastAccessed);
+    if (this.chunks.size - this.releaseKeys.size > this.config.MAX_CHUNKS) {
+      const candidates: Chunk[] = [];
+      for (const [key, chunk] of this.chunks) {
+        if (chunk.state === 'unloading' && !this.releaseKeys.has(key)) candidates.push(chunk);
+      }
+      candidates.sort((a, b) => a.metrics.lastAccessed - b.metrics.lastAccessed);
 
-      while (
-        working.size - keysToRelease.length > this.config.MAX_CHUNKS &&
-        candidates.length > 0
-      ) {
-        const [key] = candidates.shift()!;
-        if (!keysToRelease.includes(key)) keysToRelease.push(key);
+      for (const chunk of candidates) {
+        if (this.chunks.size - this.releaseKeys.size <= this.config.MAX_CHUNKS) break;
+        this.releaseKeys.add(getChunkKey(chunk.meta.coord));
       }
     }
-
-    return { chunksAfterCull: working, keysToRelease, hasChanges };
   }
 
-  private createRequest(coord: ChunkCoord, key: ChunkKey, attempts: number): StreamingRequest {
-    const center = getChunkCenter(coord, this.config.CHUNK_SIZE);
-    const dist = this.currentCamera ? distanceToChunk(this.currentCamera.position, center) : Infinity;
+  private releasePendingKeys(): void {
+    if (this.releaseKeys.size === 0) return;
+
+    for (const key of this.releaseKeys) {
+      const chunk = this.chunks.get(key);
+      if (!chunk) continue;
+      if (chunk.gpu) {
+        this.gpuGenerator.releaseResources(chunk.gpu);
+        chunk.gpu = null;
+      }
+      if (isRenderableChunk(chunk)) this.markRenderChange(chunk);
+      this.chunks.delete(key);
+      if (this.visibleKeys.delete(key)) this.visibilityToggled.add(key);
+    }
+
+    this.releaseKeys.clear();
+  }
+
+  private markRenderChange(chunk: Chunk): void {
+    this.dirtyCoords.add(spatialKeyOf(chunk.meta.coord));
+    this.chunksChanged = true;
+  }
+
+  private createRequest(
+    coord: ChunkCoord,
+    key: ChunkKey,
+    attempts: number,
+    now: number,
+  ): StreamingRequest {
+    let dist = Infinity;
+    if (this.hasCamera) {
+      const half = this.config.CHUNK_SIZE / 2;
+      const dx = this.cameraX - (coord.x * this.config.CHUNK_SIZE + half);
+      const dz = this.cameraZ - (coord.z * this.config.CHUNK_SIZE + half);
+      dist = Math.sqrt(dx * dx + dz * dz);
+    }
     return {
       key,
       coord,
       score: dist,
       distanceAtEnqueue: dist,
-      enqueuedAt: performance.now(),
+      enqueuedAt: now,
       attempts,
     };
   }
 
-  private enqueueNewChunks(desired: ChunkCoord[], working: Map<ChunkKey, Chunk>): void {
-    for (const coord of desired) {
-      const key = getChunkKey(coord);
-      if (working.has(key)) continue;
+  private enqueueNewChunks(): void {
+    const now = performance.now();
+    for (const entry of this.desired) {
+      const key = entry.key;
+      if (this.chunks.has(key)) continue;
       if (this.concurrencyPool.has(key)) continue;
       if (this.queue.has(key)) continue;
 
-      this.queue.enqueue(this.createRequest(coord, key, 0));
+      this.queue.enqueue(this.createRequest(entry.coord, key, 0, now));
     }
   }
 
-  private drainQueue(working: Map<ChunkKey, Chunk>): number {
+  private drainQueue(): number {
     const freeSlots = this.config.MAX_CONCURRENT_GENERATIONS - this.concurrencyPool.size;
     const budget = Math.min(freeSlots, this.config.GENERATION_BUDGET);
 
@@ -625,7 +653,7 @@ export class ChunkManager {
       const key = req.key;
 
       // Skip if already active or generating
-      if (working.has(key)) continue;
+      if (this.chunks.has(key)) continue;
       if (this.concurrencyPool.has(key)) continue;
 
       const token = this.nextGenerationToken++;
@@ -642,38 +670,11 @@ export class ChunkManager {
         break;
       }
 
-      working.set(key, this.buildPendingChunk(req.coord));
+      this.chunks.set(key, this.buildPendingChunk(req.coord));
       submitted++;
-      this.needsNeighborUpdate = true;
     }
 
     return submitted;
-  }
-
-  private applyMutations(mutations: {
-    chunksAfterCull: Map<ChunkKey, Chunk>;
-    keysToRelease: ChunkKey[];
-    hasChanges: boolean;
-  }): void {
-    const { chunksAfterCull, keysToRelease, hasChanges } = mutations;
-    const hadReleases = keysToRelease.length > 0;
-
-    // Release GPU resources for evicted chunks
-    for (const key of keysToRelease) {
-      const chunk = chunksAfterCull.get(key);
-      if (chunk?.gpu) {
-        this.gpuGenerator.releaseResources(chunk.gpu);
-      }
-      chunksAfterCull.delete(key);
-    }
-
-    if (hasChanges || hadReleases) {
-      // Single atomic signal update
-      this.activeChunks.set(new Map(chunksAfterCull));
-      if (hadReleases) {
-        this.needsNeighborUpdate = true;
-      }
-    }
   }
 
   private buildPendingChunk(coord: ChunkCoord): Chunk {
@@ -733,34 +734,24 @@ export class ChunkManager {
     }
     this.inflight.delete(key);
 
-    const chunks = this.activeChunks();
-    const chunk = chunks.get(key);
+    const chunk = this.chunks.get(key);
     if (!chunk || (chunk.state !== 'generating' && chunk.state !== 'unloading')) {
       this.gpuGenerator.releaseResources(result.gpuResources);
       return;
     }
 
     const now = performance.now();
-    const wasUnloading = chunk.state === 'unloading';
-    const next = new Map(chunks);
-    next.set(key, {
-      ...chunk,
-      state: wasUnloading ? 'unloading' : 'ready',
-      bounds: result.bounds,
-      gpu: result.gpuResources,
-      geometryData: result.geometry,
-      failure: undefined,
-      metrics: {
-        ...chunk.metrics,
-        generationTime: now - genStart,
-        lastAccessed: wasUnloading ? chunk.metrics.lastAccessed : now,
-        frameCount: 0,
-      },
-    });
-    this.activeChunks.set(next);
+    if (chunk.state === 'generating') {
+      chunk.state = 'ready';
+      chunk.metrics.lastAccessed = now;
+    }
+    chunk.bounds = result.bounds;
+    chunk.gpu = result.gpuResources;
+    chunk.geometryData = result.geometry;
+    chunk.failure = undefined;
+    chunk.metrics.generationTime = now - genStart;
 
-    this.submissionCounter.update((n) => n + 1);
-    this.needsNeighborUpdate = true;
+    if (isRenderableChunk(chunk)) this.markRenderChange(chunk);
   }
 
   private handleGenerationTimeout(key: ChunkKey, now: number): void {
@@ -771,178 +762,150 @@ export class ChunkManager {
   }
 
   private markFailed(key: ChunkKey, attempts: number, now: number): void {
-    const chunks = this.activeChunks();
-    const chunk = chunks.get(key);
+    const chunk = this.chunks.get(key);
     if (!chunk) return;
 
+    if (isRenderableChunk(chunk)) this.markRenderChange(chunk);
     if (chunk.gpu) {
       this.gpuGenerator.releaseResources(chunk.gpu);
     }
 
-    const next = new Map(chunks);
-    next.set(key, {
-      ...chunk,
-      state: 'error',
-      gpu: null,
-      geometryData: undefined,
-      failure: { attempts, retryAt: now + retryDelayMs(attempts) },
-    });
-    this.activeChunks.set(next);
+    chunk.state = 'error';
+    chunk.gpu = null;
+    chunk.geometryData = undefined;
+    chunk.failure = { attempts, retryAt: now + retryDelayMs(attempts) };
+    if (this.visibleKeys.delete(key)) this.visibilityToggled.add(key);
   }
 
-  private updateVisibilityFast(chunks: Map<ChunkKey, Chunk>, frustum: FrustumPlanes): void {
-    const newVisible = new Set<ChunkKey>();
+  private updateVisibility(frustum: FrustumPlanes): void {
+    for (const [key, chunk] of this.chunks) {
+      const visible = isRenderableChunk(chunk) && intersectsFrustumAABB(chunk.bounds, frustum);
+      if (visible === this.visibleKeys.has(key)) continue;
 
-    for (const [key, chunk] of chunks) {
-      if (chunk.state !== 'ready' && chunk.state !== 'unloading') continue;
-      if (intersectsFrustumAABB(chunk.bounds, frustum)) {
-        newVisible.add(key);
+      if (visible) {
+        this.visibleKeys.add(key);
+      } else {
+        this.visibleKeys.delete(key);
+      }
+      this.visibilityToggled.add(key);
+    }
+  }
+
+  getStats(): ChunkManagerStats {
+    let readyCount = 0;
+    let unloadingCount = 0;
+    let generatingCount = 0;
+    let errorCount = 0;
+    let storageBytes = 0;
+
+    for (const chunk of this.chunks.values()) {
+      switch (chunk.state) {
+        case 'ready':
+          readyCount++;
+          break;
+        case 'unloading':
+          unloadingCount++;
+          break;
+        case 'generating':
+        case 'pending':
+          generatingCount++;
+          break;
+        case 'error':
+          errorCount++;
+          break;
+      }
+      if (chunk.gpu) {
+        const res = chunk.meta.resolution;
+        storageBytes += res * res * 4;
       }
     }
 
-    const currentVisible = this.visibleKeys();
-    const changed =
-      newVisible.size !== currentVisible.size ||
-      !Array.from(newVisible).every((k) => currentVisible.has(k));
+    const capacity = this.config.RING_BUFFER_CAPACITY;
 
-    if (changed) {
-      this.visibleKeys.set(newVisible);
-    }
-  }
-
-  private updateNeighborMasks(chunks: Map<ChunkKey, Chunk>): void {
-    const chunkMap = new Map<ChunkKey, { meta: { coord: ChunkCoord } }>();
-    for (const [k, v] of chunks) {
-      chunkMap.set(k, { meta: { coord: v.meta.coord } });
-    }
-
-    let changed = false;
-    for (const [key, chunk] of chunks) {
-      if (chunk.state !== 'ready') continue;
-
-      const mask = calculateNeighborMask(chunk.meta.coord, chunkMap as any);
-      if (mask !== chunk.metrics.neighborMask) {
-        chunks.set(key, {
-          ...chunk,
-          metrics: {
-            ...chunk.metrics,
-            neighborMask: mask,
-            lastNeighborUpdate: performance.now(),
-          },
-        });
-        changed = true;
-      }
-    }
-
-    if (changed) {
-      // Only update the signal if something actually changed
-      this.activeChunks.set(new Map(chunks));
-    }
-  }
-
-  getChunkSystemState(): Signal<ChunkSystemState> {
-    return computed(() => {
-      const bufferSize = this.queue.size;
-      const bufferCapacity = this.config.RING_BUFFER_CAPACITY;
-
-      return {
-        activeChunks: this.activeChunks(),
-        visibleKeys: this.visibleKeys(),
-        generatingKeys: new Set(this.concurrencyPool.activeKeys()),
-        cameraChunk: this.cameraChunk(),
-        submissionCounter: this.submissionCounter(),
-        stats: {
-          totalVRAM: this.calculateTotalVRAM(),
-          visibleCount: this.visibleKeys().size,
-          pendingCount: bufferSize,
-          generatingCount: this.concurrencyPool.size,
-          readyCount: Array.from(this.activeChunks().values()).filter((c) => c.state === 'ready')
-            .length,
-          fps: 1000 / (this.perfStats().frameTimeMs || 16),
-          gpuWaitTime: this.perfStats().gpuTimeMs,
-          // Streaming metrics
-          streamingBufferUsage: bufferCapacity > 0 ? bufferSize / bufferCapacity : 0,
-          anticipationScore: this.queue.avgAnticipationGain(),
-          concurrencySlots: this.concurrencyPool.size,
-        },
-      };
-    });
+    return {
+      activeCount: this.chunks.size,
+      readyCount,
+      unloadingCount,
+      generatingCount,
+      errorCount,
+      visibleCount: this.visibleKeys.size,
+      pendingCount: this.queue.size,
+      concurrencySlots: this.concurrencyPool.size,
+      storageBytes,
+      updateTimeMs: this.lastUpdateTimeMs,
+      streamingBufferUsage: capacity > 0 ? this.queue.size / capacity : 0,
+      anticipationScore: this.queue.avgAnticipationGain(),
+    };
   }
 
   getTerrainHeightAt(x: number, z: number): number | null {
-    let targetChunk: Chunk | null = null;
+    const size = this.config.CHUNK_SIZE;
+    const chunkX = Math.floor(x / size);
+    const chunkZ = Math.floor(z / size);
 
-    for (const chunk of this.activeChunks().values()) {
-      if (chunk.state !== 'ready' || !chunk.geometryData) continue;
-
-      const { min, max } = chunk.bounds;
-      if (x >= min.x && x < max.x && z >= min.z && z < max.z) {
-        if (!targetChunk || chunk.meta.resolution > targetChunk.meta.resolution) {
-          targetChunk = chunk;
-        }
+    let target: Chunk | undefined;
+    for (let lod = 0; lod <= MAX_LOD; lod++) {
+      const chunk = this.chunks.get(`${chunkX}:${chunkZ}:${lod}` as ChunkKey);
+      if (!chunk || !chunk.geometryData) continue;
+      if (chunk.state === 'ready') {
+        target = chunk;
+        break;
       }
+      if (!target && chunk.state === 'unloading') target = chunk;
     }
 
-    if (!targetChunk || !targetChunk.geometryData) return null;
+    if (!target || !target.geometryData) return null;
 
-    const localX = x - targetChunk.meta.worldOrigin.x;
-    const localZ = z - targetChunk.meta.worldOrigin.z;
+    const res = target.meta.resolution;
+    const cellSize = size / (res - 1);
 
-    const res = targetChunk.meta.resolution;
-    const cellSize = this.config.CHUNK_SIZE / (res - 1);
+    const fx = (x - chunkX * size) / cellSize;
+    const fz = (z - chunkZ * size) / cellSize;
 
-    const gridX = Math.floor(localX / cellSize);
-    const gridZ = Math.floor(localZ / cellSize);
+    const gridX = Math.min(Math.max(Math.floor(fx), 0), res - 2);
+    const gridZ = Math.min(Math.max(Math.floor(fz), 0), res - 2);
 
-    if (gridX < 0 || gridX >= res - 1 || gridZ < 0 || gridZ >= res - 1) return null;
+    const u = Math.min(Math.max(fx - gridX, 0), 1);
+    const v = Math.min(Math.max(fz - gridZ, 0), 1);
 
-    const u = (localX % cellSize) / cellSize;
-    const v = (localZ % cellSize) / cellSize;
+    const { positions } = target.geometryData;
+    const h00 = positions[(gridZ * res + gridX) * 3 + 1];
+    const h10 = positions[(gridZ * res + gridX + 1) * 3 + 1];
+    const h01 = positions[((gridZ + 1) * res + gridX) * 3 + 1];
+    const h11 = positions[((gridZ + 1) * res + gridX + 1) * 3 + 1];
 
-    const { positions } = targetChunk.geometryData;
-    const idx00 = (gridZ * res + gridX) * 3 + 1;
-    const idx10 = (gridZ * res + (gridX + 1)) * 3 + 1;
-    const idx01 = ((gridZ + 1) * res + gridX) * 3 + 1;
-    const idx11 = ((gridZ + 1) * res + (gridX + 1)) * 3 + 1;
-
-    const h00 = positions[idx00];
-    const h10 = positions[idx10];
-    const h01 = positions[idx01];
-    const h11 = positions[idx11];
-
-    return (h00 * (1 - u) + h10 * u) * (1 - v) + (h01 * (1 - u) + h11 * u) * v;
+    if (u + v <= 1) {
+      return h00 + (h10 - h00) * u + (h01 - h00) * v;
+    }
+    return h11 + (h01 - h11) * (1 - u) + (h10 - h11) * (1 - v);
   }
 
   clearAllChunks(): void {
-    const chunks = untracked(() => this.activeChunks());
-    for (const chunk of chunks.values()) {
+    for (const chunk of this.chunks.values()) {
       if (chunk.gpu) {
         this.gpuGenerator.releaseResources(chunk.gpu);
+        chunk.gpu = null;
       }
+      if (isRenderableChunk(chunk)) this.markRenderChange(chunk);
     }
-    this.activeChunks.set(new Map());
+    for (const key of this.visibleKeys) this.visibilityToggled.add(key);
+
+    this.chunks.clear();
+    this.visibleKeys.clear();
+    this.releaseKeys.clear();
     this.queue.clear();
     this.concurrencyPool.clear();
     this.inflight.clear();
-    this.visibleKeys.set(new Set());
-    this.cachedDesiredChunks = [];
+    this.desired = [];
+    this.desiredKeys.clear();
+    this.desiredLODByCoord.clear();
+    this.lastCameraPos = { x: Infinity, z: Infinity };
     this.velocityTracker.reset();
+    this.chunksChanged = true;
   }
 
   dispose(): void {
     this.clearAllChunks();
-  }
-
-  private calculateTotalVRAM(): number {
-    let total = 0;
-    for (const chunk of this.activeChunks().values()) {
-      if (chunk.gpu) {
-        const res = chunk.meta.resolution;
-        total += res * res * 4; // Position buffer (float32 per vertex)
-        total += (res - 1) * (res - 1) * 6 * 2; // Index buffer (uint16)
-      }
-    }
-    return total;
   }
 
   private estimateBounds(coord: ChunkCoord): ChunkBounds {

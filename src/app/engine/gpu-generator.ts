@@ -360,6 +360,13 @@ export class GPUGenerator {
     return { min, max, center, radius };
   }
 
+  getPooledBytes(): number {
+    let bytes = 0;
+    for (const [byteLength, pool] of this.bufferPool) bytes += byteLength * pool.length;
+    for (const [size, pool] of this.stagingBuffers) bytes += size * pool.length;
+    return bytes;
+  }
+
   releaseResources(resources: ChunkGPUResources) {
     this.returnStorageBuffer(resources.positionBuffer as StorageBufferAttribute | null);
     // Normals are now null, nothing to release
