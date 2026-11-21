@@ -1,7 +1,7 @@
 <div class="terrain-viewport">
   <canvas #terrainCanvas></canvas>
 
-  @if (showDiagnostics && engine.isReady()) {
+  @if (showDiagnostics() && engine.isReady()) {
     @let stats = engine.stats();
     <div class="engine-diagnostics">
       <div class="diagnostic-panel">

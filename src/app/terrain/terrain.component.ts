@@ -1,18 +1,16 @@
 import {
+  AfterViewInit,
+  ChangeDetectionStrategy,
   Component,
   ElementRef,
-  ViewChild,
   OnDestroy,
-  OnInit,
-  AfterViewInit,
   inject,
-  NgZone,
-  Input,
-  Output,
-  EventEmitter,
+  input,
+  output,
   signal,
+  viewChild,
 } from '@angular/core';
-import { CommonModule } from '@angular/common';
+import { DecimalPipe } from '@angular/common';
 import * as THREE from 'three';
 import { TerrainEngine } from '../engine/terrain-engine';
 import { TerrainConfig } from '../types/terrain';
@@ -25,25 +23,21 @@ const EYE_HEIGHT = 5.0;
 
 @Component({
   selector: 'app-terrain',
-  standalone: true,
   templateUrl: './terrain.component.html',
   styleUrl: './terrain.component.scss',
-  imports: [CommonModule],
+  imports: [DecimalPipe],
   providers: [TerrainEngine],
+  changeDetection: ChangeDetectionStrategy.OnPush,
 })
-export class TerrainComponent implements OnInit, AfterViewInit, OnDestroy {
-  @ViewChild('terrainCanvas', { static: true })
-  private readonly canvasRef!: ElementRef<HTMLCanvasElement>;
+export class TerrainComponent implements AfterViewInit, OnDestroy {
+  readonly configOverrides = input<Partial<TerrainConfig>>();
+  readonly showDiagnostics = input(true);
+  readonly engineReady = output<boolean>();
 
-  @Input() configOverrides?: Partial<TerrainConfig>;
-
-  @Input() showDiagnostics = true;
-
-  @Output() engineReady = new EventEmitter<boolean>();
+  private readonly canvasRef = viewChild.required<ElementRef<HTMLCanvasElement>>('terrainCanvas');
 
   public readonly engine = inject(TerrainEngine);
   private readonly globalConfig = inject(TERRAIN_CONFIG);
-  private readonly ngZone = inject(NgZone);
 
   public readonly isPointerLocked = signal(false);
   private cameraPitch = 0;
@@ -58,18 +52,19 @@ export class TerrainComponent implements OnInit, AfterViewInit, OnDestroy {
   private readonly activeKeys = new Set<string>();
 
   private cleanupFunctions: (() => void)[] = [];
-
-  ngOnInit(): void {}
+  private destroyed = false;
 
   async ngAfterViewInit(): Promise<void> {
-    const canvas = this.canvasRef.nativeElement;
+    const canvas = this.canvasRef().nativeElement;
 
     const finalConfig: TerrainConfig = {
       ...this.globalConfig,
-      ...this.configOverrides,
+      ...this.configOverrides(),
     };
 
     const success = await this.engine.init(canvas, finalConfig);
+
+    if (this.destroyed) return;
 
     if (success) {
       this.engine.setCameraPosition(
@@ -80,11 +75,9 @@ export class TerrainComponent implements OnInit, AfterViewInit, OnDestroy {
       this.engine.lookAt(0, 0, 0);
       this.syncOrientationFromEngine();
 
-      this.ngZone.runOutsideAngular(() => {
-        this.setupFlyCameraControls(canvas);
-        this.engine.setFrameCallback((delta) => this.updateCameraLogic(delta));
-        this.engine.start();
-      });
+      this.setupFlyCameraControls(canvas);
+      this.engine.setFrameCallback((delta) => this.updateCameraLogic(delta));
+      this.engine.start();
 
       this.engineReady.emit(true);
     } else {
@@ -94,6 +87,7 @@ export class TerrainComponent implements OnInit, AfterViewInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
+    this.destroyed = true;
     this.engine.setFrameCallback(null);
 
     this.cleanupFunctions.forEach((cleanupFn) => cleanupFn());
