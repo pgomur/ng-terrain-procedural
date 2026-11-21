@@ -214,10 +214,19 @@ export class GPUGenerator<TOwner = unknown> {
   }
 
   getAllocatedBytes(): number {
+    return this.getAtlasBytes() + this.getStagingBytes();
+  }
+
+  getAtlasBytes(): number {
     let bytes = 0;
     for (const page of this.pages) {
       bytes += page.heights.array.byteLength + page.bounds.array.byteLength + page.jobs.array.byteLength;
     }
+    return bytes;
+  }
+
+  getStagingBytes(): number {
+    let bytes = 0;
     for (const [size, pool] of this.stagingPool) bytes += size * pool.length;
     return bytes;
   }

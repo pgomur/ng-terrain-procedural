@@ -6,7 +6,7 @@ import { SceneGraph, SHADOW_CASTER_LAYER } from './scene-graph';
 import { DEFAULT_TERRAIN_CONFIG, type TerrainConfig } from '../types/terrain';
 import type { ChunkLOD, FrustumPlanes } from '../types/chunk';
 import { encodeSeamCode, seamLodDiff, skirtDepthFor, stitchedHeight } from '../math/chunk-coord';
-import { FakeHeightGenerator } from '../../testing/fake-height-generator';
+import { CpuHeightGenerator } from '../../testing/cpu-height-generator';
 
 const config: TerrainConfig = {
   ...DEFAULT_TERRAIN_CONFIG,
@@ -82,7 +82,7 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 2));
 
 function setup() {
   const scene = new THREE.Scene();
-  const generator = new FakeHeightGenerator(config, () => 'ok', heightFn);
+  const generator = new CpuHeightGenerator(config, () => 'ok', heightFn);
   const manager = new ChunkManager(config, generator as never);
   const graph = new SceneGraph(scene, config, pageSource());
   return { scene, generator, manager, graph };

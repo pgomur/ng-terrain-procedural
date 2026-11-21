@@ -213,20 +213,15 @@ export class SceneGraph {
     return this.entries.get(spatialKey)?.seamCode;
   }
 
-  getGeometryBytes(): number {
-    let bytes = 0;
+  getGpuAttributes(): THREE.BufferAttribute[] {
+    const attributes: THREE.BufferAttribute[] = [];
     for (const base of this.baseGeometries.values()) {
-      bytes +=
-        base.position.array.byteLength + base.heightIndex.array.byteLength + base.index.array.byteLength;
+      attributes.push(base.position, base.heightIndex, base.index);
     }
     for (const batch of this.batches.values()) {
-      bytes +=
-        batch.instanceData.array.byteLength +
-        batch.mesh.instanceMatrix.array.byteLength +
-        batch.shadowData.array.byteLength +
-        batch.shadowMesh.instanceMatrix.array.byteLength;
+      attributes.push(batch.instanceData, batch.shadowData);
     }
-    return bytes;
+    return attributes;
   }
 
   prewarm(pages: readonly HeightPage[]): void {

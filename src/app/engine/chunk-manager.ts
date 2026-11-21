@@ -267,6 +267,7 @@ export interface ChunkManagerStats {
   readonly unloadingCount: number;
   readonly errorCount: number;
   readonly visibleCount: number;
+  readonly visibleByLod: readonly number[];
   readonly pendingCount: number;
   readonly exactBoundsCount: number;
   readonly heightsCachedCount: number;
@@ -750,6 +751,12 @@ export class ChunkManager {
       if (chunk.heights) heightsCachedCount++;
     }
 
+    const visibleByLod = new Array<number>(MAX_LOD + 1).fill(0);
+    for (const key of this.visibleKeys) {
+      const chunk = this.chunks.get(key);
+      if (chunk) visibleByLod[chunk.meta.coord.lod]++;
+    }
+
     const capacity = this.config.GENERATION_QUEUE_CAPACITY;
 
     return {
@@ -758,6 +765,7 @@ export class ChunkManager {
       unloadingCount,
       errorCount,
       visibleCount: this.visibleKeys.size,
+      visibleByLod,
       pendingCount: this.queue.size,
       exactBoundsCount,
       heightsCachedCount,
