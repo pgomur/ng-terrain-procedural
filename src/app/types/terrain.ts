@@ -1,4 +1,4 @@
-import type { ChunkCoord, ChunkLOD, WorldPosition } from './chunk';
+import type { ChunkLOD, WorldPosition } from './chunk';
 
 /**
  * Global terrain engine configuration
@@ -11,12 +11,10 @@ export interface TerrainConfig {
 
   // LOD and distance
   readonly LOD_DISTANCES: [number, number, number];
-  readonly LOD_TRANSITION_RANGE: number;
 
   // Generation
   readonly GENERATION_BUDGET: number;
   readonly UNLOAD_DELAY_FRAMES: number;
-  readonly PENDING_QUEUE_MAX: number;
 
   // Noise procedural (FBM)
   readonly NOISE_SEED: number;
@@ -36,12 +34,6 @@ export interface TerrainConfig {
 
   // Features
   readonly SEAM_FITTING_ENABLED: boolean;
-  readonly OCCLUSION_CULLING_ENABLED: boolean;
-  readonly FRUSTUM_CULLING_ENABLED: boolean;
-
-  // GPU
-  readonly USE_COMPUTE_SHADERS: boolean;
-  readonly COMPUTE_WORKGROUP_SIZE: 8 | 16 | 32;
 
   // Streaming / Buffer de Anticipación
   /**
@@ -56,22 +48,11 @@ export interface TerrainConfig {
    */
   readonly VELOCITY_WEIGHT: number;
   /**
-   * Fixed capacity of the circular anticipation ring buffer.
+   * Fixed capacity of the generation priority queue.
    * Requests beyond this limit evict the lowest-priority resident.
    * Default: 256.
    */
-  readonly RING_BUFFER_CAPACITY: number;
-}
-
-/**
- * Result of configuration validation against device capabilities
- */
-export interface ConfigValidation {
-  readonly isValid: boolean;
-  readonly errors: readonly string[];
-  readonly warnings: readonly string[];
-  readonly adjustedConfig: TerrainConfig;
-  readonly appliedOverrides: readonly string[];
+  readonly GENERATION_QUEUE_CAPACITY: number;
 }
 
 /**
@@ -81,44 +62,7 @@ export type EngineInitState =
   | 'uninitialized' // Nothing created
   | 'initializing' // Requesting WebGPU device
   | 'ready' // Ready to generate terrain
-  | 'fallback' // WebGPU not available, CPU mode
   | 'failed'; // Unrecoverable error
-
-/**
- * WebGPU device capabilities detected
- */
-export interface GPUCapabilities {
-  readonly maxBufferSize: number;
-  readonly maxComputeWorkgroupSize: number;
-  readonly maxComputeInvocations: number;
-  readonly maxStorageBufferBindingSize: number;
-  readonly supportsTimestampQuery: boolean;
-  readonly supportsOcclusionQuery: boolean;
-  readonly vendor: string; // "nvidia", "amd", "intel", "apple", "unknown"
-  readonly adapterInfo: unknown;
-}
-
-/**
- * References to global WebGPU resources (not per chunk)
- * Singleton handled by TerrainEngine
- */
-export interface GlobalGPUResources {
-  readonly device: unknown; // GPUDevice
-  readonly queue: unknown; // GPUQueue
-  readonly presentationFormat: string;
-
-  // Reusable Pipelines
-  readonly elevationPipeline: unknown;
-  readonly normalPipeline: unknown;
-
-  // Layouts (CPU-GPU contracts)
-  readonly bindGroupLayout: unknown;
-  readonly pipelineLayout: unknown;
-
-  // Global buffers
-  readonly noiseParamsBuffer: unknown;
-  readonly cameraBuffer: unknown;
-}
 
 /**
  * Camera status in world coordinates
@@ -139,67 +83,6 @@ export interface CameraState {
 }
 
 /**
- * Queued generation request
- * The ChunkManager converts pending ChunkCoords into these requests
- */
-export interface GenerationRequest {
-  readonly coord: ChunkCoord;
-  readonly priority: number;
-  readonly frameRequested: number;
-  readonly attempts: number;
-}
-
-/**
- * Result of the elevation stage (compute shader)
- * Intermediate before calculating normals
- */
-export interface ElevationResult {
-  readonly heightmap: Float32Array;
-  readonly minHeight: number;
-  readonly maxHeight: number;
-}
-
-/**
- * Land lifecycle events
- * For debugging and external metrics
- */
-export interface TerrainEventMap {
-  'chunk-generated': { coord: ChunkCoord; timeMs: number };
-  'chunk-unloaded': { coord: ChunkCoord; lifetimeFrames: number };
-  'lod-changed': { from: ChunkLOD; to: ChunkLOD; chunkKey: string };
-  'gpu-error': { error: Error; fatal: boolean };
-  'fallback-activated': { reason: string };
-  'config-adjusted': {
-    original: Partial<TerrainConfig>;
-    adjusted: TerrainConfig;
-    reasons: string[];
-  };
-}
-
-/**
- * TerrainEngine initialization options
- */
-export interface TerrainEngineOptions {
-  readonly canvas: HTMLCanvasElement;
-  readonly config?: Partial<TerrainConfig>;
-  readonly onEvent?: <K extends keyof TerrainEventMap>(type: K, data: TerrainEventMap[K]) => void;
-}
-
-/**
- * Performance snapshot for debugging
- */
-export interface PerformanceSnapshot {
-  readonly timestamp: number;
-  readonly frameTimeMs: number;
-  readonly gpuTimeMs: number;
-  readonly chunksRendered: number;
-  readonly chunksVisible: number;
-  readonly trianglesDrawn: number;
-  readonly drawCalls: number;
-  readonly memoryGPU: number;
-}
-
-/**
  * Constant engine defaults
  * Exported for testing and partial overrides
  */
@@ -208,10 +91,8 @@ export const DEFAULT_TERRAIN_CONFIG: Readonly<TerrainConfig> = {
   MAX_CHUNKS: 1024,
   CHUNK_RESOLUTIONS: { 0: 65, 1: 33, 2: 17, 3: 9 },
   LOD_DISTANCES: [600, 1500, 3000],
-  LOD_TRANSITION_RANGE: 50,
   GENERATION_BUDGET: 16,
   UNLOAD_DELAY_FRAMES: 60,
-  PENDING_QUEUE_MAX: 128,
   NOISE_SEED: 12345,
   NOISE_OCTAVES: 4,
   NOISE_PERSISTENCE: 0.5,
@@ -223,28 +104,8 @@ export const DEFAULT_TERRAIN_CONFIG: Readonly<TerrainConfig> = {
   TERRAIN_HEIGHT_SCALE: 100,
   TERRAIN_OFFSET_Y: 0,
   SEAM_FITTING_ENABLED: true,
-  OCCLUSION_CULLING_ENABLED: false,
-  FRUSTUM_CULLING_ENABLED: true,
-  USE_COMPUTE_SHADERS: true,
-  COMPUTE_WORKGROUP_SIZE: 8,
   // Streaming / Buffer de Anticipación
   ANTICIPATION_FRAMES: 60,
   VELOCITY_WEIGHT: 0.6,
-  RING_BUFFER_CAPACITY: 256,
-} as const;
-
-/**
- * System hard limits for validation
- */
-export const TERRAIN_LIMITS = {
-  MIN_CHUNK_SIZE: 32,
-  MAX_CHUNK_SIZE: 512,
-  MIN_RESOLUTION: 4,
-  MAX_RESOLUTION: 256,
-  MAX_LOD_LEVELS: 4,
-  MAX_GENERATION_BUDGET: 64,
-  MIN_UNLOAD_DELAY: 10,
-  MAX_PENDING_QUEUE: 128,
-  MAX_WARP_STRENGTH: 1.0,
-  MAX_NOISE_OCTAVES: 16,
+  GENERATION_QUEUE_CAPACITY: 256,
 } as const;

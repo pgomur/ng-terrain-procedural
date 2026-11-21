@@ -28,7 +28,6 @@ export type ChunkLOD = 0 | 1 | 2 | 3;
  * WebGPU is asynchronous
  */
 export type ChunkState =
-  | 'pending' // Queued for generation
   | 'generating' // Compute shader queued in command buffer
   | 'ready' // GPU finished, resources ready for rendering
   | 'unloading' // Marked for release
@@ -40,9 +39,7 @@ export type ChunkState =
 export interface ChunkMeta {
   readonly coord: ChunkCoord;
   readonly worldOrigin: WorldPosition;
-  readonly size: number;
   readonly resolution: number;
-  readonly seed: number;
 }
 
 /**
@@ -65,31 +62,8 @@ export interface ChunkBounds {
 }
 
 /**
- * Neighbor mask for seam fitting (T-junctions)
- * Each bit indicates whether the neighbor in that direction has a lower LOD
- */
-export type NeighborMask = number;
-
-/**
- * Visibility flags to optimize culling
- */
-export interface ChunkVisibility {
-  readonly inFrustum: boolean;
-  readonly wasVisible: boolean;
-  readonly occlusionIndex: number;
-}
-
-/**
- * CPU-GPU synchronization.
- */
-export interface ChunkGPUSync {
-  readonly submissionId: number;
-  readonly fenceValue: number;
-}
-
-/**
  * GPU resources allocated to the chunk.
- * Optional because they don't exist during 'pending'/'generating'
+ * Optional because they don't exist during 'generating'
  */
 export interface ChunkGPUResources {
   readonly pageId: number;
@@ -106,26 +80,11 @@ export interface ChunkMetrics {
   readonly createdAt: number;
   generationTime: number;
   lastAccessed: number;
-  readonly frameCount: number;
-
-  // Distance and priority
-  readonly distanceToCamera: number;
-  readonly priorityScore: number;
-
-  // Visibility
-  readonly visibility: ChunkVisibility;
-
-  // GPU synchronization
-  readonly sync: ChunkGPUSync | null;
-
-  // Seam fitting
-  readonly neighborMask: NeighborMask;
-  readonly lastNeighborUpdate: number;
 }
 
 /**
  * Full chunk entity
- * Mutable only in state, GPU, mesh, metrics (managed by ChunkManager)
+ * Mutable only in state, GPU, bounds, metrics (managed by ChunkManager)
  */
 export interface Chunk {
   readonly meta: ChunkMeta;
@@ -134,8 +93,6 @@ export interface Chunk {
   state: ChunkState;
   gpu: ChunkGPUResources | null;
   metrics: ChunkMetrics;
-
-  mesh: unknown | null;
 
   heights?: Float32Array;
 
@@ -150,7 +107,7 @@ export interface ChunkFailure {
 // Streaming System Types
 
 /**
- * Enriched generation request stored in the AnticipationRingBuffer.
+ * Enriched generation request stored in the StreamingPriorityQueue.
  * Contains a pre-computed priority score that accounts for camera velocity
  * and predicted position, not just raw distance.
  */
@@ -168,50 +125,6 @@ export interface StreamingRequest {
 }
 
 /**
- * Streaming subsystem metrics exported per-frame.
- * Available on ChunkSystemState.stats for external monitoring.
- */
-export interface StreamingStats {
-  /** Ring buffer fill ratio [0..1]: ringSize / capacity. */
-  readonly bufferUsage: number;
-  /** Number of concurrency pool slots currently occupied. */
-  readonly activeSlots: number;
-  /** Smoothed camera speed in world-units per second. */
-  readonly cameraSpeed: number;
-  /** Weighted average anticipation gain for queued requests. */
-  readonly avgAnticipationGain: number;
-}
-
-/**
- * System configuration (injected)
- */
-export interface TerrainConfig {
-  readonly CHUNK_SIZE: 64 | 128 | 256;
-  readonly MAX_CHUNKS: number;
-  readonly LOD_DISTANCES: [number, number, number];
-  readonly GENERATION_BUDGET: number;
-  readonly UNLOAD_DELAY: number;
-  readonly OCCLUSION_QUERY_ENABLED: boolean;
-  readonly SEAM_FITTING_ENABLED: boolean;
-}
-
-/**
  * Unique Hash for Maps/Sets: "x:z:lod"
  */
 export type ChunkKey = `${number}:${number}:${ChunkLOD}`;
-
-/**
- * Cardinal directions for neighbors
- */
-export const NEIGHBOR_DIRECTIONS = ['top', 'right', 'bottom', 'left'] as const;
-export type NeighborDirection = (typeof NEIGHBOR_DIRECTIONS)[number];
-
-/**
- * Coordinate offsets for each direction
- */
-export const NEIGHBOR_OFFSETS: Record<NeighborDirection, { dx: number; dz: number }> = {
-  top: { dx: 0, dz: -1 },
-  right: { dx: 1, dz: 0 },
-  bottom: { dx: 0, dz: 1 },
-  left: { dx: -1, dz: 0 },
-};
