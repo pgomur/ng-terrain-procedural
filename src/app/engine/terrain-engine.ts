@@ -39,6 +39,11 @@ const STATS_INTERVAL_MS = 250;
 const SHADOW_MAP_SIZE = 2048;
 const CAMERA_NEAR = 1;
 const SUN_DIRECTION = new THREE.Vector3(100, 200, 50).normalize();
+const MAX_PIXEL_RATIO = 2;
+
+function currentPixelRatio(): number {
+  return Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO);
+}
 
 @Injectable()
 export class TerrainEngine {
@@ -67,6 +72,11 @@ export class TerrainEngine {
 
   private canvas: HTMLCanvasElement | null = null;
   private resizeObserver: ResizeObserver | null = null;
+  private observedWidth = 0;
+  private observedHeight = 0;
+  private appliedWidth = 0;
+  private appliedHeight = 0;
+  private appliedPixelRatio = 0;
 
   private viewInitialized = false;
   private readonly lastCameraMatrix = new THREE.Matrix4();
@@ -172,8 +182,13 @@ export class TerrainEngine {
 
     await renderer.init();
 
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.setSize(canvas.clientWidth, canvas.clientHeight);
+    this.observedWidth = canvas.clientWidth;
+    this.observedHeight = canvas.clientHeight;
+    this.appliedPixelRatio = currentPixelRatio();
+    this.appliedWidth = Math.max(1, this.observedWidth);
+    this.appliedHeight = Math.max(1, this.observedHeight);
+    renderer.setPixelRatio(this.appliedPixelRatio);
+    renderer.setSize(this.appliedWidth, this.appliedHeight, false);
     renderer.setClearColor(0x87ceeb, 1);
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -207,7 +222,7 @@ export class TerrainEngine {
   private initCamera(): void {
     if (!this.canvas) return;
 
-    const aspect = this.canvas.clientWidth / this.canvas.clientHeight;
+    const aspect = this.appliedWidth / this.appliedHeight;
     const far = this.loadRadius() + this.config.CHUNK_SIZE * Math.SQRT2;
     this.camera = new THREE.PerspectiveCamera(60, aspect, CAMERA_NEAR, far);
 
@@ -300,19 +315,37 @@ export class TerrainEngine {
 
     this.resizeObserver = new ResizeObserver((entries) => {
       for (const entry of entries) {
-        const { width, height } = entry.contentRect;
-        this.handleResize(width, height);
+        this.observedWidth = entry.contentRect.width;
+        this.observedHeight = entry.contentRect.height;
       }
     });
 
     this.resizeObserver.observe(this.canvas);
   }
 
-  private handleResize(width: number, height: number): void {
-    if (!this.camera || !this.renderer || width <= 0 || height <= 0) return;
+  private syncViewportSize(): void {
+    if (!this.camera || !this.renderer) return;
+
+    const width = Math.floor(this.observedWidth);
+    const height = Math.floor(this.observedHeight);
+    if (width <= 0 || height <= 0) return;
+
+    const pixelRatio = currentPixelRatio();
+    if (
+      width === this.appliedWidth &&
+      height === this.appliedHeight &&
+      pixelRatio === this.appliedPixelRatio
+    ) {
+      return;
+    }
+
+    this.appliedWidth = width;
+    this.appliedHeight = height;
+    this.appliedPixelRatio = pixelRatio;
 
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
+    this.renderer.setPixelRatio(pixelRatio);
     this.renderer.setSize(width, height, false);
   }
 
@@ -349,6 +382,7 @@ export class TerrainEngine {
 
     const cpuStart = performance.now();
 
+    this.syncViewportSize();
     this.frameCallback?.(delta);
     this.update();
 

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ChunkManager, StreamingPriorityQueue } from './chunk-manager';
 import { DEFAULT_TERRAIN_CONFIG, type TerrainConfig } from '../types/terrain';
 import type { ChunkKey, FrustumPlanes, StreamingRequest } from '../types/chunk';
-import { FakeHeightGenerator } from '../../testing/fake-height-generator';
+import { CpuHeightGenerator } from '../../testing/cpu-height-generator';
 
 const config: TerrainConfig = {
   ...DEFAULT_TERRAIN_CONFIG,
@@ -19,7 +19,7 @@ const everything: FrustumPlanes = {
 const tick = () => new Promise((resolve) => setTimeout(resolve, 2));
 const cameraAt = (x: number, z: number) => ({ position: { x, y: 50, z } }) as never;
 
-function createManager(generator: FakeHeightGenerator, cfg = config) {
+function createManager(generator: CpuHeightGenerator, cfg = config) {
   return new ChunkManager(cfg, generator as never);
 }
 
@@ -124,7 +124,7 @@ describe('ChunkManager', () => {
   afterEach(() => vi.restoreAllMocks());
 
   it('generates synchronously within the per-frame budget', () => {
-    const generator = new FakeHeightGenerator(config);
+    const generator = new CpuHeightGenerator(config);
     const manager = createManager(generator);
     manager.update(cameraAt(0, 0), everything);
     const stats = manager.getStats();
@@ -134,7 +134,7 @@ describe('ChunkManager', () => {
   });
 
   it('loads the whole area, refines every bound and holds one slot per chunk', async () => {
-    const generator = new FakeHeightGenerator(config);
+    const generator = new CpuHeightGenerator(config);
     const manager = createManager(generator);
     expect(await runUntilSettled(manager, cameraAt(0, 0))).toBeGreaterThan(0);
     expect(generator.live.size).toBe(slotsHeld(manager));
@@ -142,7 +142,7 @@ describe('ChunkManager', () => {
 
   it('retries failed generations with backoff instead of leaving holes', async () => {
     const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    const generator = new FakeHeightGenerator(config, (key, attempt) =>
+    const generator = new CpuHeightGenerator(config, (key, attempt) =>
       key === '0:0:0' && attempt <= 3 ? 'fail' : 'ok',
     );
     const manager = createManager(generator);
@@ -154,7 +154,7 @@ describe('ChunkManager', () => {
   }, 30_000);
 
   it('ignores bounds and heights that arrive after the chunk was released', async () => {
-    const generator = new FakeHeightGenerator(config, () => 'ok', () => 50, 200);
+    const generator = new CpuHeightGenerator(config, () => 'ok', () => 50, 200);
     const manager = createManager(generator);
     manager.update(cameraAt(0, 0), everything);
     const firstChunks = [...manager.getChunks().values()];
@@ -172,7 +172,7 @@ describe('ChunkManager', () => {
   }, 30_000);
 
   it('requests collision heights around the camera and retries a failed read', async () => {
-    const generator = new FakeHeightGenerator(config, () => 'ok', (x, z) => 10 + x * 0.01 + z * 0.02);
+    const generator = new CpuHeightGenerator(config, () => 'ok', (x, z) => 10 + x * 0.01 + z * 0.02);
     generator.failHeightsOnce.add('0:0:0' as ChunkKey);
     const manager = createManager(generator);
     await runUntilSettled(manager, cameraAt(10, 10));
@@ -188,7 +188,7 @@ describe('ChunkManager', () => {
   it('survives a long flight without leaks, with a bounded queue', async () => {
     const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const failsFirst = (key: string) => [...key].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7) % 7 === 0;
-    const generator = new FakeHeightGenerator(config, (key, attempt) =>
+    const generator = new CpuHeightGenerator(config, (key, attempt) =>
       attempt === 1 && failsFirst(key) ? 'fail' : 'ok',
     );
     const manager = createManager(generator);
