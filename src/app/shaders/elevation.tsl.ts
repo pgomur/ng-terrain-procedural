@@ -1,79 +1,39 @@
 import {
   If,
+  Loop,
+  Return,
   vec2,
-  vec3,
-  vec4,
   float,
   int,
-  uint,
   Fn,
   uniform,
   storage,
-  globalId
+  instanceIndex,
+  mx_noise_float,
 } from 'three/tsl';
 
-/**
- * TSL node for 2D hash to float.
- * Permutation based on sin() to avoid lookup tables
- */
-const hash22 = Fn(([p]: [ReturnType<typeof vec2>]) => {
-  const k = float(0.3183099);
-  const k2 = float(0.3678794);
+export const NOISE_FREQUENCY = 0.001;
 
-  const x = float(p.x.mul(k).add(p.y.mul(k2)))
-    .fract()
-    .mul(2.0)
-    .sub(1.0);
-  const y = float(p.x.mul(k2).sub(p.y.mul(k)))
-    .fract()
-    .mul(2.0)
-    .sub(1.0);
+export const MAX_NOISE_OCTAVES = 12;
 
-  return vec2(x, y);
-});
+const SEED_OFFSET_RANGE = 256;
 
-/**
- * TSL node for 2D Simplex Noise
- * Standard implementation with mod 289 for permutation
- */
-const simplexNoise2D = Fn(([p_immutable]: [ReturnType<typeof vec2>]) => {
-  const p = vec2(p_immutable);
+export function seedToNoiseOffset(seed: number): { x: number; z: number } {
+  const hash = (v: number): number => {
+    let h = v | 0;
+    h = Math.imul(h ^ (h >>> 16), 0x85ebca6b);
+    h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
+    h ^= h >>> 16;
+    return (h >>> 0) / 4294967296;
+  };
+  return {
+    x: hash(seed) * SEED_OFFSET_RANGE,
+    z: hash(seed ^ 0x9e3779b9) * SEED_OFFSET_RANGE,
+  };
+}
 
-  // Skewing and unskewing constants
-  const C = vec4(0.211324865405187, 0.366025403784439, -0.577350269189626, 0.024390243902439);
-
-  const i = vec2(p.add(p.dot(C.yy))).floor();
-  const x0 = vec2(p.sub(i).sub(i.dot(C.xx)));
-
-  const i1 = vec2(x0.x.greaterThan(x0.y).select(vec2(1.0, 0.0), vec2(0.0, 1.0)));
-
-  const x12 = vec4(x0.xy.sub(i1), x0.xy.sub(1.0));
-
-  const i_mod = i.sub(i.div(289.0).floor().mul(289.0));
-
-  const p_hash = hash22(i_mod.div(289.0));
-  const p_hash2 = hash22(i_mod.add(i1).div(289.0));
-  const p_hash3 = hash22(i_mod.add(1.0).div(289.0));
-
-  const m = vec3(
-    float(0.5).sub(x0.dot(x0)).max(0.0),
-    float(0.5).sub(x12.xy.dot(x12.xy)).max(0.0),
-    float(0.5).sub(x12.zw.dot(x12.zw)).max(0.0),
-  );
-
-  const m2 = m.mul(m).mul(m);
-
-  const x = vec3(x0.dot(p_hash), x12.xy.dot(p_hash2), x12.zw.dot(p_hash3));
-
-  return float(70.0).mul(m2.dot(x));
-});
-
-/**
- * FBM with manual unwound loop (TSL does not support dynamic loops natively in compute)
- * Maximum 6 octaves for better optimization
- */
 const fbm = Fn(
-  ([p, octavesVal, persistenceVal, lacunarityVal]: [
+  ([p, octaves, persistence, lacunarity]: [
     ReturnType<typeof vec2>,
     ReturnType<typeof float>,
     ReturnType<typeof float>,
@@ -82,66 +42,20 @@ const fbm = Fn(
     const total = float(0.0).toVar();
     const amplitude = float(1.0).toVar();
     const frequency = float(1.0).toVar();
-    const maxValue = float(0.0).toVar();
+    const norm = float(0.0).toVar();
 
-    const octaves = int(octavesVal);
-
-    // 6 iterations maximum (Precise loop unrolling)
-    const i0 = int(0);
-    If(i0.lessThan(octaves), () => {
-      total.addAssign(simplexNoise2D(p.mul(frequency)).mul(amplitude));
-      maxValue.addAssign(amplitude);
-      amplitude.mulAssign(persistenceVal);
-      frequency.mulAssign(lacunarityVal);
-
-      const i1 = int(1);
-      If(i1.lessThan(octaves), () => {
-        total.addAssign(simplexNoise2D(p.mul(frequency)).mul(amplitude));
-        maxValue.addAssign(amplitude);
-        amplitude.mulAssign(persistenceVal);
-        frequency.mulAssign(lacunarityVal);
-
-        const i2 = int(2);
-        If(i2.lessThan(octaves), () => {
-          total.addAssign(simplexNoise2D(p.mul(frequency)).mul(amplitude));
-          maxValue.addAssign(amplitude);
-          amplitude.mulAssign(persistenceVal);
-          frequency.mulAssign(lacunarityVal);
-
-          const i3 = int(3);
-          If(i3.lessThan(octaves), () => {
-            total.addAssign(simplexNoise2D(p.mul(frequency)).mul(amplitude));
-            maxValue.addAssign(amplitude);
-            amplitude.mulAssign(persistenceVal);
-            frequency.mulAssign(lacunarityVal);
-
-            const i4 = int(4);
-            If(i4.lessThan(octaves), () => {
-              total.addAssign(simplexNoise2D(p.mul(frequency)).mul(amplitude));
-              maxValue.addAssign(amplitude);
-              amplitude.mulAssign(persistenceVal);
-              frequency.mulAssign(lacunarityVal);
-
-              const i5 = int(5);
-              If(i5.lessThan(octaves), () => {
-                total.addAssign(simplexNoise2D(p.mul(frequency)).mul(amplitude));
-                maxValue.addAssign(amplitude);
-                amplitude.mulAssign(persistenceVal);
-                frequency.mulAssign(lacunarityVal);
-              });
-            });
-          });
-        });
-      });
+    Loop({ start: int(0), end: int(octaves), type: 'int', condition: '<' }, ({ i }) => {
+      const shift = vec2(17.13, 31.71).mul(float(i));
+      total.addAssign(mx_noise_float(p.mul(frequency).add(shift)).mul(amplitude));
+      norm.addAssign(amplitude);
+      amplitude.mulAssign(persistence);
+      frequency.mulAssign(lacunarity);
     });
 
-    return total.div(maxValue);
+    return total.div(norm.max(1e-6));
   },
 );
 
-/**
- * Domain Warping - Simplified version (1 PASS)
- */
 const domainWarp = Fn(
   ([p, warpStrength, warpOctaves, warpScale, baseOctaves, basePersistence, baseLacunarity]: [
     ReturnType<typeof vec2>,
@@ -152,40 +66,22 @@ const domainWarp = Fn(
     ReturnType<typeof float>,
     ReturnType<typeof float>,
   ]) => {
-    // Single FBM pass for offset
-    const offset = fbm(p.mul(warpScale).add(vec2(1.7, 9.2)), warpOctaves, float(0.5), float(2.0));
-    const warpedP = p.add(offset.mul(warpStrength));
+    const q = p.mul(warpScale);
+    const warpX = fbm(q.add(vec2(1.7, 9.2)), warpOctaves, float(0.5), float(2.0));
+    const warpZ = fbm(q.add(vec2(8.3, 2.8)), warpOctaves, float(0.5), float(2.0));
+    const warpedP = p.add(vec2(warpX, warpZ).mul(warpStrength));
 
     return fbm(warpedP, baseOctaves, basePersistence, baseLacunarity);
   },
 );
 
-/**
- * Interface for shader parameters
- */
-export interface ElevationUniforms {
-  chunkOriginX: number;
-  chunkOriginZ: number;
-  chunkSize: number;
-  resolution: number;
-  seed: number;
-  octaves: number;
-  persistence: number;
-  lacunarity: number;
-  heightScale: number;
-  offsetY: number;
-  warpEnabled: number;
-  warpStrength: number;
-  warpOctaves: number;
-  warpScale: number;
-}
-
 export function createElevationComputeNode(resolution: number) {
   const uChunkOriginX = uniform(float(0));
   const uChunkOriginZ = uniform(float(0));
   const uChunkSize = uniform(float(128));
-  const uSeed = uniform(float(12345));
-  const uOctaves = uniform(float(6));
+  const uSeedOffsetX = uniform(float(0));
+  const uSeedOffsetZ = uniform(float(0));
+  const uOctaves = uniform(float(4));
   const uPersistence = uniform(float(0.5));
   const uLacunarity = uniform(float(2.0));
   const uHeightScale = uniform(float(100));
@@ -195,32 +91,36 @@ export function createElevationComputeNode(resolution: number) {
   const uWarpOctaves = uniform(float(1));
   const uWarpScale = uniform(float(0.5));
 
+  const res = int(resolution);
+  const totalSize = int(resolution * resolution);
+  const invSpan = float(1 / (resolution - 1));
+
   const computeFn = Fn(([outputBuffer]: [ReturnType<typeof storage>]) => {
-    const globalIdx = int(uint(globalId).x);
-    const res = int(resolution);
-    const totalSize = res.mul(res);
+    const globalIdx = int(instanceIndex);
 
     If(globalIdx.greaterThanEqual(totalSize), () => {
-      return;
+      Return();
     });
 
-    const x = int(globalIdx.mod(res));
-    const z = int(globalIdx.div(res));
+    const x = globalIdx.mod(res);
+    const z = globalIdx.div(res);
 
-    const u = float(x).add(0.5).div(float(res));
-    const v = float(z).add(0.5).div(float(res));
+    const u = float(x).mul(invSpan);
+    const v = float(z).mul(invSpan);
 
-    const worldX = uChunkOriginX.add(u.mul(uChunkSize)).add(uSeed.mul(1000.0));
-    const worldZ = uChunkOriginZ.add(v.mul(uChunkSize)).add(uSeed.mul(1000.0));
+    const worldX = uChunkOriginX.add(u.mul(uChunkSize));
+    const worldZ = uChunkOriginZ.add(v.mul(uChunkSize));
 
-    const worldPos = vec2(worldX, worldZ).mul(0.001);
+    const noiseP = vec2(worldX, worldZ)
+      .mul(NOISE_FREQUENCY)
+      .add(vec2(uSeedOffsetX, uSeedOffsetZ));
 
     const elevation = float(0.0).toVar();
 
-    If(uWarpEnabled.equal(float(1)), () => {
+    If(uWarpEnabled.greaterThan(float(0.5)), () => {
       elevation.assign(
         domainWarp(
-          worldPos,
+          noiseP,
           uWarpStrength,
           uWarpOctaves,
           uWarpScale,
@@ -230,7 +130,7 @@ export function createElevationComputeNode(resolution: number) {
         ),
       );
     }).Else(() => {
-      elevation.assign(fbm(worldPos, uOctaves, uPersistence, uLacunarity));
+      elevation.assign(fbm(noiseP, uOctaves, uPersistence, uLacunarity));
     });
 
     elevation.assign(elevation.mul(0.5).add(0.5));
@@ -241,12 +141,13 @@ export function createElevationComputeNode(resolution: number) {
   });
 
   return {
-    computeFn: computeFn,
+    computeFn,
     uniforms: {
       chunkOriginX: uChunkOriginX,
       chunkOriginZ: uChunkOriginZ,
       chunkSize: uChunkSize,
-      seed: uSeed,
+      seedOffsetX: uSeedOffsetX,
+      seedOffsetZ: uSeedOffsetZ,
       octaves: uOctaves,
       persistence: uPersistence,
       lacunarity: uLacunarity,
@@ -261,20 +162,3 @@ export function createElevationComputeNode(resolution: number) {
     workgroupSize: 64,
   };
 }
-
-export const ELEVATION_BIND_GROUP_LAYOUT = {
-  entries: [
-    {
-      binding: 0,
-      visibility: GPUShaderStage.COMPUTE,
-      buffer: { type: 'uniform' },
-    },
-    {
-      binding: 1,
-      visibility: GPUShaderStage.COMPUTE,
-      buffer: { type: 'storage' },
-    },
-  ],
-} as const;
-
-export const ELEVATION_UNIFORM_SIZE = 64;

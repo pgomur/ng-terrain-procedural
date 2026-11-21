@@ -143,6 +143,13 @@ export interface Chunk {
   mesh: unknown | null;
 
   geometryData?: ChunkGeometryData;
+
+  failure?: ChunkFailure;
+}
+
+export interface ChunkFailure {
+  readonly attempts: number;
+  readonly retryAt: number;
 }
 
 /**
@@ -179,6 +186,7 @@ export interface ChunkSystemState {
  * and predicted position, not just raw distance.
  */
 export interface StreamingRequest {
+  readonly key: ChunkKey;
   readonly coord: ChunkCoord;
   /** Lower score = higher priority. Updated by reprioritize(). */
   score: number;

@@ -2,7 +2,11 @@ import * as THREE from 'three';
 import { WebGPURenderer } from 'three/webgpu';
 import { storage } from 'three/tsl';
 
-import { createElevationComputeNode } from '../shaders/elevation.tsl';
+import {
+  createElevationComputeNode,
+  seedToNoiseOffset,
+  MAX_NOISE_OCTAVES,
+} from '../shaders/elevation.tsl';
 import { ChunkCoord, ChunkGeometryData, ChunkBounds, ChunkGPUResources } from '../types/chunk';
 import { TerrainConfig } from '../types/terrain';
 
@@ -33,9 +37,12 @@ export class GPUGenerator {
   private queue: GPUQueue | null = null;
   private backend: any = null;
 
+  private readonly seedOffset: { x: number; z: number };
+
   constructor(renderer: WebGPURenderer, config: TerrainConfig) {
     this.renderer = renderer;
     this.config = config;
+    this.seedOffset = seedToNoiseOffset(config.NOISE_SEED);
     this.extractWebGPUBackend();
   }
 
@@ -66,39 +73,43 @@ export class GPUGenerator {
     const pipeline = this.getComputePipeline(resolution);
     const positionStorage = this.getStorageBuffer(vertexCount);
 
-    pipeline.positionStorageNode.value = positionStorage;
+    try {
+      pipeline.positionStorageNode.value = positionStorage;
 
-    this.updateElevationUniforms(pipeline.elevationNode, coord);
+      this.updateElevationUniforms(pipeline.elevationNode, coord);
 
-    this.renderer.compute(pipeline.elevationCompute as any);
+      this.renderer.compute(pipeline.elevationCompute as any);
 
-    await this.waitForGPU();
+      await this.waitForGPU();
 
-    if ((this.renderer as any).resolveTimestamps) {
-      (this.renderer as any).resolveTimestamps();
-    }
+      if ((this.renderer as any).resolveTimestamps) {
+        (this.renderer as any).resolveTimestamps();
+      }
 
-    let posGPUBuffer = this.extractGPUBuffer(positionStorage);
-    if (!posGPUBuffer) {
-      await new Promise((r) => requestAnimationFrame(r));
-      posGPUBuffer = this.extractGPUBuffer(positionStorage);
-    }
+      let posGPUBuffer = this.extractGPUBuffer(positionStorage);
+      if (!posGPUBuffer) {
+        await new Promise((r) => requestAnimationFrame(r));
+        posGPUBuffer = this.extractGPUBuffer(positionStorage);
+      }
 
-    const gpuResources: ChunkGPUResources = {
-      positionBuffer: positionStorage,
-      normalBuffer: null, // Normals removed for optimization
-      indexBuffer: this.getIndexBuffer(resolution),
-      uniformBuffer: null,
-      bindGroup: null,
-      indexCount: (resolution - 1) * (resolution - 1) * 6,
-      vertexCount: vertexCount,
-    } as unknown as ChunkGPUResources;
+      if (!posGPUBuffer) {
+        throw new Error(`Storage buffer not available for chunk ${coord.x}:${coord.z}:${coord.lod}`);
+      }
 
-    if (posGPUBuffer) {
       const { positions, minHeight, maxHeight } = await this.readbackGeometry(
         posGPUBuffer,
         resolution,
       );
+
+      const gpuResources: ChunkGPUResources = {
+        positionBuffer: positionStorage,
+        normalBuffer: null, // Normals removed for optimization
+        indexBuffer: this.getIndexBuffer(resolution),
+        uniformBuffer: null,
+        bindGroup: null,
+        indexCount: (resolution - 1) * (resolution - 1) * 6,
+        vertexCount: vertexCount,
+      } as unknown as ChunkGPUResources;
 
       const geometry: ChunkGeometryData = {
         positions,
@@ -113,13 +124,10 @@ export class GPUGenerator {
         gpuResources,
         readyToRender: true,
       };
+    } catch (error) {
+      this.returnStorageBuffer(positionStorage);
+      throw error;
     }
-
-    return {
-      bounds: this.estimateBounds(coord),
-      gpuResources,
-      readyToRender: true,
-    };
   }
 
   private getComputePipeline(resolution: number) {
@@ -152,15 +160,19 @@ export class GPUGenerator {
     u.chunkOriginX.value = coord.x * this.config.CHUNK_SIZE;
     u.chunkOriginZ.value = coord.z * this.config.CHUNK_SIZE;
     u.chunkSize.value = this.config.CHUNK_SIZE;
-    u.seed.value = this.config.NOISE_SEED + (coord.x * 374761 + coord.z * 668265);
-    u.octaves.value = this.config.NOISE_OCTAVES;
+    u.seedOffsetX.value = this.seedOffset.x;
+    u.seedOffsetZ.value = this.seedOffset.z;
+    u.octaves.value = Math.max(1, Math.min(MAX_NOISE_OCTAVES, Math.round(this.config.NOISE_OCTAVES)));
     u.persistence.value = this.config.NOISE_PERSISTENCE;
     u.lacunarity.value = this.config.NOISE_LACUNARITY;
     u.heightScale.value = this.config.TERRAIN_HEIGHT_SCALE;
     u.offsetY.value = this.config.TERRAIN_OFFSET_Y;
     u.warpEnabled.value = this.config.NOISE_WARP_ENABLED ? 1 : 0;
     u.warpStrength.value = this.config.NOISE_WARP_STRENGTH;
-    u.warpOctaves.value = this.config.NOISE_WARP_OCTAVES;
+    u.warpOctaves.value = Math.max(
+      1,
+      Math.min(MAX_NOISE_OCTAVES, Math.round(this.config.NOISE_WARP_OCTAVES)),
+    );
     u.warpScale.value = this.config.NOISE_WARP_SCALE;
   }
 
@@ -252,11 +264,16 @@ export class GPUGenerator {
 
     const posStaging = this.getStagingBuffer(posSize);
 
-    const encoder = this.device.createCommandEncoder();
-    encoder.copyBufferToBuffer(positionBuffer, 0, posStaging, 0, posSize);
-    this.queue.submit([encoder.finish()]);
+    try {
+      const encoder = this.device.createCommandEncoder();
+      encoder.copyBufferToBuffer(positionBuffer, 0, posStaging, 0, posSize);
+      this.queue.submit([encoder.finish()]);
 
-    await posStaging.mapAsync(GPUMapMode.READ);
+      await posStaging.mapAsync(GPUMapMode.READ);
+    } catch (error) {
+      this.releaseStagingBuffer(posSize, posStaging);
+      throw error;
+    }
 
     const posMapped = new Float32Array(posStaging.getMappedRange());
 
@@ -343,41 +360,21 @@ export class GPUGenerator {
     return { min, max, center, radius };
   }
 
-  private estimateBounds(coord: ChunkCoord): ChunkBounds {
-    const originX = coord.x * this.config.CHUNK_SIZE;
-    const originZ = coord.z * this.config.CHUNK_SIZE;
-
-    const maxH = this.config.TERRAIN_HEIGHT_SCALE * 2.0 + this.config.TERRAIN_OFFSET_Y;
-    const minH = this.config.TERRAIN_OFFSET_Y - this.config.TERRAIN_HEIGHT_SCALE * 1.5;
-
-    const min = { x: originX, y: minH, z: originZ };
-    const max = {
-      x: originX + this.config.CHUNK_SIZE,
-      y: maxH,
-      z: originZ + this.config.CHUNK_SIZE,
-    };
-    const center = { x: (min.x + max.x) / 2, y: (min.y + max.y) / 2, z: (min.z + max.z) / 2 };
-
-    const radius = Math.sqrt(
-      3 * Math.pow(this.config.CHUNK_SIZE / 2, 2) + Math.pow(maxH - minH, 2) / 2,
-    );
-
-    return { min, max, center, radius };
+  releaseResources(resources: ChunkGPUResources) {
+    this.returnStorageBuffer(resources.positionBuffer as StorageBufferAttribute | null);
+    // Normals are now null, nothing to release
   }
 
-  releaseResources(resources: ChunkGPUResources) {
-    const returnToPool = (buf: any) => {
-      if (!buf?.array) return;
-      const byteLength = (buf.array as Float32Array).byteLength;
+  private returnStorageBuffer(buf: StorageBufferAttribute | null | undefined) {
+    if (!buf?.array) return;
+    const byteLength = (buf.array as Float32Array).byteLength;
 
-      if (!this.bufferPool.has(byteLength)) {
-        this.bufferPool.set(byteLength, []);
-      }
-      this.bufferPool.get(byteLength)!.push(buf as StorageBufferAttribute);
-    };
-
-    returnToPool(resources.positionBuffer);
-    // Normals are now null, nothing to release
+    let pool = this.bufferPool.get(byteLength);
+    if (!pool) {
+      pool = [];
+      this.bufferPool.set(byteLength, pool);
+    }
+    if (!pool.includes(buf)) pool.push(buf);
   }
 
   dispose() {
