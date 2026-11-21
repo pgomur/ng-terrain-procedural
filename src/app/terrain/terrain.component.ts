@@ -20,6 +20,7 @@ const MOUSE_SENSITIVITY = 0.002;
 const PITCH_LIMIT = Math.PI / 2 - 0.01;
 const SPRINT_MULTIPLIER = 3.0;
 const EYE_HEIGHT = 5.0;
+const CARDINALS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'] as const;
 
 @Component({
   selector: 'app-terrain',
@@ -53,6 +54,10 @@ export class TerrainComponent implements AfterViewInit, OnDestroy {
 
   private cleanupFunctions: (() => void)[] = [];
   private destroyed = false;
+
+  protected cardinal(headingDeg: number): string {
+    return CARDINALS[Math.round(headingDeg / 45) % CARDINALS.length];
+  }
 
   async ngAfterViewInit(): Promise<void> {
     const canvas = this.canvasRef().nativeElement;
