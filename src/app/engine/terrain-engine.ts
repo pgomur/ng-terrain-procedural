@@ -1,4 +1,4 @@
-import { Injectable, NgZone, inject, signal, computed } from '@angular/core';
+import { Injectable, signal, computed } from '@angular/core';
 import * as THREE from 'three';
 import { WebGPURenderer } from 'three/webgpu';
 import { color, fog, positionView, smoothstep, uniform } from 'three/tsl';
@@ -42,8 +42,6 @@ const SUN_DIRECTION = new THREE.Vector3(100, 200, 50).normalize();
 
 @Injectable()
 export class TerrainEngine {
-  private readonly ngZone = inject(NgZone);
-
   private config: TerrainConfig = DEFAULT_TERRAIN_CONFIG;
 
   private renderer: WebGPURenderer | null = null;
@@ -53,8 +51,6 @@ export class TerrainEngine {
   private gpuGenerator: GPUGenerator<Chunk> | null = null;
   private chunkManager: ChunkManager | null = null;
   private sceneGraph: SceneGraph | null = null;
-  private raycaster = new THREE.Raycaster();
-  private centerMouse = new THREE.Vector2(0, 0);
 
   private readonly initStateSignal = signal<EngineInitState>('uninitialized');
   private readonly statsSignal = signal<TerrainEngineStats | null>(null);
@@ -64,6 +60,7 @@ export class TerrainEngine {
   readonly stats = this.statsSignal.asReadonly();
 
   private isRunning = false;
+  private initGeneration = 0;
   private animationId: number | null = null;
   private lastLoopTime = -1;
   private frameCallback: FrameCallback | null = null;
@@ -109,8 +106,10 @@ export class TerrainEngine {
   async init(canvas: HTMLCanvasElement, customConfig?: Partial<TerrainConfig>): Promise<boolean> {
     if (this.initStateSignal() !== 'uninitialized') {
       console.warn('TerrainEngine already initialized');
-      return true;
+      return this.initStateSignal() === 'ready';
     }
+
+    const generation = ++this.initGeneration;
 
     this.initStateSignal.set('initializing');
     this.canvas = canvas;
@@ -120,7 +119,13 @@ export class TerrainEngine {
     }
 
     try {
-      await this.initRenderer(canvas);
+      const renderer = await this.createRenderer(canvas);
+      if (generation !== this.initGeneration) {
+        renderer.dispose();
+        return false;
+      }
+      this.renderer = renderer;
+
       this.initScene();
       this.initCamera();
       this.initLights();
@@ -138,13 +143,14 @@ export class TerrainEngine {
 
       return true;
     } catch (error) {
+      if (generation !== this.initGeneration) return false;
       console.error('Error initializing TerrainEngine:', error);
       this.initStateSignal.set('failed');
       return false;
     }
   }
 
-  private async initRenderer(canvas: HTMLCanvasElement): Promise<void> {
+  private async createRenderer(canvas: HTMLCanvasElement): Promise<WebGPURenderer> {
     if (!navigator.gpu) {
       throw new Error('WebGPU is not supported in this browser');
     }
@@ -157,20 +163,22 @@ export class TerrainEngine {
       throw new Error('WebGPU adapter could not be obtained');
     }
 
-    this.renderer = new WebGPURenderer({
+    const renderer = new WebGPURenderer({
       canvas,
       antialias: true,
       alpha: false,
       powerPreference: 'high-performance',
     });
 
-    await this.renderer.init();
+    await renderer.init();
 
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    this.renderer.setSize(canvas.clientWidth, canvas.clientHeight);
-    this.renderer.setClearColor(0x87ceeb, 1);
-    this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(canvas.clientWidth, canvas.clientHeight);
+    renderer.setClearColor(0x87ceeb, 1);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+    return renderer;
   }
 
   private loadRadius(): number {
@@ -319,9 +327,7 @@ export class TerrainEngine {
     this.lastLoopTime = -1;
     this.statsWindowStart = -1;
 
-    this.ngZone.runOutsideAngular(() => {
-      this.animationId = requestAnimationFrame(this.renderLoop);
-    });
+    this.animationId = requestAnimationFrame(this.renderLoop);
   }
 
   stop(): void {
@@ -511,14 +517,8 @@ export class TerrainEngine {
     this.camera?.lookAt(x, y, z);
   }
 
-  getCenterIntersection(): THREE.Intersection | null {
-    if (!this.camera || !this.scene) return null;
-    this.raycaster.setFromCamera(this.centerMouse, this.camera);
-    const intersects = this.raycaster.intersectObjects(this.scene.children, true);
-    return intersects.length > 0 ? intersects[0] : null;
-  }
-
   dispose(): void {
+    this.initGeneration++;
     this.stop();
     this.frameCallback = null;
 

@@ -27,6 +27,11 @@ function stagingBucket(byteLength: number): number {
   return size;
 }
 
+interface BackendInternals {
+  readonly device?: GPUDevice;
+  get?(resource: object): { readonly buffer?: GPUBuffer } | undefined;
+}
+
 export interface HeightListener<TOwner> {
   onBounds(owner: TOwner, minHeight: number, maxHeight: number): void;
   onHeights(owner: TOwner, heights: Float32Array | null): void;
@@ -234,8 +239,8 @@ export class GPUGenerator<TOwner = unknown> {
       list.length === 0
         ? estimate
         : Math.max(MIN_PAGE_SLOTS, Math.ceil(estimate * GROWTH_PAGE_FRACTION));
-    const maxBindingBytes: number =
-      (this.renderer as any).backend?.device?.limits?.maxStorageBufferBindingSize ??
+    const maxBindingBytes =
+      this.backendInternals()?.device?.limits.maxStorageBufferBindingSize ??
       DEFAULT_MAX_STORAGE_BINDING_BYTES;
     const capacity = Math.max(
       1,
@@ -380,9 +385,9 @@ export class GPUGenerator<TOwner = unknown> {
     byteOffset: number,
     byteLength: number,
   ): Promise<ArrayBuffer> {
-    const backend = (this.renderer as any).backend;
-    const device: GPUDevice | undefined = backend?.device;
-    const source: GPUBuffer | undefined = backend?.get?.(attribute)?.buffer;
+    const backend = this.backendInternals();
+    const device = backend?.device;
+    const source = backend?.get?.(attribute)?.buffer;
 
     if (!device || !source) {
       const full = await this.renderer.getArrayBufferAsync(attribute);
@@ -402,6 +407,10 @@ export class GPUGenerator<TOwner = unknown> {
       if (staging.mapState === 'mapped') staging.unmap();
       this.releaseStaging(bucket, staging);
     }
+  }
+
+  private backendInternals(): BackendInternals | undefined {
+    return (this.renderer as unknown as { readonly backend?: BackendInternals }).backend;
   }
 
   private acquireStaging(device: GPUDevice, size: number): GPUBuffer {

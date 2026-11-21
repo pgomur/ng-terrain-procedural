@@ -325,7 +325,7 @@ export class ChunkManager {
     this.seamsEnabled =
       config.SEAM_FITTING_ENABLED && supportsSeamStitching(config.CHUNK_RESOLUTIONS);
     this.gpuGenerator = gpuGenerator;
-    this.queue = new StreamingPriorityQueue(config.RING_BUFFER_CAPACITY);
+    this.queue = new StreamingPriorityQueue(config.GENERATION_QUEUE_CAPACITY);
     this.gpuGenerator.setListener({
       onBounds: (chunk, minHeight, maxHeight) => this.applyExactBounds(chunk, minHeight, maxHeight),
       onHeights: (chunk, heights) => this.applyHeights(chunk, heights),
@@ -638,9 +638,7 @@ export class ChunkManager {
           y: 0,
           z: coord.z * this.config.CHUNK_SIZE,
         },
-        size: this.config.CHUNK_SIZE,
         resolution: this.config.CHUNK_RESOLUTIONS[coord.lod],
-        seed: this.config.NOISE_SEED,
       },
       bounds: this.analyticBounds(coord),
       state: 'generating',
@@ -649,15 +647,7 @@ export class ChunkManager {
         createdAt: now,
         generationTime: 0,
         lastAccessed: now,
-        frameCount: 0,
-        distanceToCamera: 0,
-        priorityScore: 0,
-        visibility: { inFrustum: false, wasVisible: false, occlusionIndex: -1 },
-        sync: null,
-        neighborMask: 0,
-        lastNeighborUpdate: 0,
       },
-      mesh: null,
     };
   }
 
@@ -760,7 +750,7 @@ export class ChunkManager {
       if (chunk.heights) heightsCachedCount++;
     }
 
-    const capacity = this.config.RING_BUFFER_CAPACITY;
+    const capacity = this.config.GENERATION_QUEUE_CAPACITY;
 
     return {
       activeCount: this.chunks.size,
