@@ -176,18 +176,37 @@
     </div>
   }
 
-  @if (engine.initState() === 'initializing') {
-    <div class="loading-overlay">
-      <div class="spinner"></div>
-      <p>Initializing WebGPU pipeline...</p>
-    </div>
-  }
-
   @if (engine.initState() === 'failed') {
-    <div class="error-overlay">
-      <div class="error-message">
-        <h3>Critical Hardware Error</h3>
-        <p>WebGPU could not be initialized. Please check that your browser or GPU backend supports it correctly.</p>
+    <div class="loader" role="alert">
+      <div class="loader-content">
+        <h1 class="loader-title">Procedural Terrain</h1>
+        <p class="loader-error-title">WebGPU could not start</p>
+        <p class="loader-error">
+          This browser or GPU can't run WebGPU. Use a recent desktop version of Chrome, Edge, Safari or Firefox, and
+          make sure hardware acceleration is enabled.
+        </p>
+      </div>
+    </div>
+  } @else {
+    <div class="loader" [class.is-done]="engine.loadingStage() === 'done'" role="status">
+      <div class="loader-content">
+        <h1 class="loader-title">Procedural Terrain</h1>
+        <div
+          class="loader-bar"
+          [class.is-indeterminate]="engine.loadingStage() === 'device' || engine.loadingStage() === 'shaders'"
+        >
+          <div class="loader-bar-fill" [style.transform]="'scaleX(' + engine.loadingProgress() + ')'"></div>
+        </div>
+        <p class="loader-status">
+          @if (engine.loadingStage() === 'device') {
+            Connecting to the GPU
+          } @else if (engine.loadingStage() === 'shaders') {
+            Compiling shaders
+          } @else {
+            Generating terrain
+            <span class="loader-percent">{{ engine.loadingProgress() * 100 | number: '1.0-0' }}%</span>
+          }
+        </p>
       </div>
     </div>
   }

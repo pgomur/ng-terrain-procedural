@@ -759,6 +759,17 @@ export class ChunkManager {
     };
   }
 
+  getLoadProgress(maxLod: ChunkLOD): { readonly ready: number; readonly wanted: number } {
+    let ready = 0;
+    let wanted = 0;
+    for (const [spatialKey, lod] of this.desiredLODByCoord) {
+      if (lod > maxLod) continue;
+      wanted++;
+      if (this.chunks.get(`${spatialKey}:${lod}` as ChunkKey)?.state === 'ready') ready++;
+    }
+    return { ready, wanted };
+  }
+
   getTerrainHeightAt(x: number, z: number): number | null {
     const size = this.config.CHUNK_SIZE;
     const chunkX = Math.floor(x / size);

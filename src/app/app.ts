@@ -10,9 +10,21 @@ import { TerrainComponent } from './terrain/terrain.component';
       @defer (on immediate) {
         <app-terrain [showDiagnostics]="true" />
       } @placeholder {
-        <div class="app-status">Loading terrain engine...</div>
+        <div class="loader" role="status">
+          <div class="loader-content">
+            <h1 class="loader-title">Procedural Terrain</h1>
+            <div class="loader-bar is-indeterminate"><div class="loader-bar-fill"></div></div>
+            <p class="loader-status">Loading engine</p>
+          </div>
+        </div>
       } @error {
-        <div class="app-status app-status--error">The terrain engine could not be loaded.</div>
+        <div class="loader" role="alert">
+          <div class="loader-content">
+            <h1 class="loader-title">Procedural Terrain</h1>
+            <p class="loader-error-title">The terrain engine could not be loaded</p>
+            <p class="loader-error">Check your connection and reload the page.</p>
+          </div>
+        </div>
       }
     </main>
   `,
@@ -23,22 +35,9 @@ import { TerrainComponent } from './terrain/terrain.component';
       height: 100%;
     }
     .app-container {
+      position: relative;
       width: 100%;
       height: 100%;
-    }
-    .app-status {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      width: 100%;
-      height: 100%;
-      background: rgba(15, 23, 42, 0.9);
-      color: #e2e8f0;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      font-size: 14px;
-    }
-    .app-status--error {
-      color: #fca5a5;
     }
   `,
 })

@@ -97,3 +97,56 @@ describe('TerrainEngine viewport sizing', () => {
     expect(camera.aspect).toBe(1);
   });
 });
+
+describe('TerrainEngine initial loading', () => {
+  interface LoadingInternals {
+    chunkManager: { getLoadProgress(maxLod: number): { ready: number; wanted: number } } | null;
+    loadingStageSignal: { set(stage: string): void };
+    trackInitialLoad(time: number): void;
+  }
+
+  const setup = (progress: { ready: number; wanted: number }) => {
+    const engine = new TerrainEngine();
+    const internals = engine as unknown as LoadingInternals;
+    internals.chunkManager = { getLoadProgress: () => progress };
+    internals.loadingStageSignal.set('terrain');
+    return { engine, internals, progress };
+  };
+
+  it('reports progress and hides the loader once every near chunk is ready', () => {
+    const { engine, internals, progress } = setup({ ready: 0, wanted: 400 });
+
+    internals.trackInitialLoad(0);
+    expect(engine.loadingStage()).toBe('terrain');
+    expect(engine.loadingProgress()).toBe(0);
+
+    progress.ready = 100;
+    internals.trackInitialLoad(16);
+    expect(engine.loadingProgress()).toBe(0.25);
+
+    progress.ready = 400;
+    internals.trackInitialLoad(32);
+    expect(engine.loadingStage()).toBe('done');
+    expect(engine.loadingProgress()).toBe(1);
+  });
+
+  it('never keeps the loader forever', () => {
+    const { engine, internals } = setup({ ready: 3, wanted: 400 });
+
+    internals.trackInitialLoad(0);
+    internals.trackInitialLoad(9_999);
+    expect(engine.loadingStage()).toBe('terrain');
+
+    internals.trackInitialLoad(10_001);
+    expect(engine.loadingStage()).toBe('done');
+  });
+
+  it('does not finish before the wanted chunks are known', () => {
+    const { engine, internals } = setup({ ready: 0, wanted: 0 });
+
+    internals.trackInitialLoad(0);
+    internals.trackInitialLoad(500);
+    expect(engine.loadingStage()).toBe('terrain');
+    expect(engine.loadingProgress()).toBe(0);
+  });
+});

@@ -48,6 +48,8 @@ export interface TerrainEngineStats {
 
 export type FrameCallback = (deltaSeconds: number) => void;
 
+export type LoadingStage = 'device' | 'shaders' | 'terrain' | 'done';
+
 type Mutable<T> = { -readonly [K in keyof T]: T[K] };
 
 interface BufferBackend {
@@ -61,6 +63,18 @@ const SHADOW_MAP_SIZE = 2048;
 const CAMERA_NEAR = 1;
 const SUN_DIRECTION = new THREE.Vector3(100, 200, 50).normalize();
 const MAX_PIXEL_RATIO = 2;
+const INITIAL_LOAD_MAX_LOD = 1;
+const INITIAL_LOAD_TIMEOUT_MS = 10_000;
+
+function nextPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        resolve();
+      });
+    });
+  });
+}
 
 function currentPixelRatio(): number {
   return Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO);
@@ -80,8 +94,13 @@ export class TerrainEngine {
 
   private readonly initStateSignal = signal<EngineInitState>('uninitialized');
   private readonly statsSignal = signal<TerrainEngineStats | null>(null);
+  private readonly loadingStageSignal = signal<LoadingStage>('device');
+  private readonly loadingProgressSignal = signal(0);
+  private loadingStart = -1;
 
   readonly initState = this.initStateSignal.asReadonly();
+  readonly loadingStage = this.loadingStageSignal.asReadonly();
+  readonly loadingProgress = this.loadingProgressSignal.asReadonly();
   readonly isReady = computed(() => this.initStateSignal() === 'ready');
   readonly stats = this.statsSignal.asReadonly();
 
@@ -149,6 +168,9 @@ export class TerrainEngine {
     const generation = ++this.initGeneration;
 
     this.initStateSignal.set('initializing');
+    this.loadingStageSignal.set('device');
+    this.loadingProgressSignal.set(0);
+    this.loadingStart = -1;
     this.canvas = canvas;
 
     if (customConfig) {
@@ -163,6 +185,10 @@ export class TerrainEngine {
       }
       this.renderer = renderer;
 
+      this.loadingStageSignal.set('shaders');
+      await nextPaint();
+      if (generation !== this.initGeneration) return false;
+
       const scene = this.initScene();
       this.initCamera();
       this.initLights();
@@ -175,6 +201,7 @@ export class TerrainEngine {
 
       this.setupResizeHandling();
 
+      this.loadingStageSignal.set('terrain');
       this.initStateSignal.set('ready');
       console.log('TerrainEngine initialized successfully');
 
@@ -417,6 +444,7 @@ export class TerrainEngine {
     this.syncViewportSize();
     this.frameCallback?.(delta);
     this.update();
+    this.trackInitialLoad(time);
 
     if (this.renderer && this.scene && this.camera) {
       this.renderer.info.reset();
@@ -429,6 +457,20 @@ export class TerrainEngine {
 
     this.animationId = requestAnimationFrame(this.renderLoop);
   };
+
+  private trackInitialLoad(time: number): void {
+    if (this.loadingStageSignal() !== 'terrain' || !this.chunkManager) return;
+    if (this.loadingStart < 0) this.loadingStart = time;
+
+    const { ready, wanted } = this.chunkManager.getLoadProgress(INITIAL_LOAD_MAX_LOD);
+    const progress = wanted > 0 ? ready / wanted : 0;
+    if (progress !== this.loadingProgressSignal()) this.loadingProgressSignal.set(progress);
+
+    if ((wanted > 0 && ready >= wanted) || time - this.loadingStart > INITIAL_LOAD_TIMEOUT_MS) {
+      this.loadingProgressSignal.set(1);
+      this.loadingStageSignal.set('done');
+    }
+  }
 
   private update(): void {
     if (!this.camera || !this.chunkManager || !this.sceneGraph) return;
