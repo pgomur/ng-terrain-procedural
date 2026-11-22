@@ -39,7 +39,6 @@ export type ChunkState =
 export interface ChunkMeta {
   readonly coord: ChunkCoord;
   readonly spatialKey: string;
-  readonly worldOrigin: WorldPosition;
   readonly resolution: number;
 }
 
@@ -77,9 +76,6 @@ export interface ChunkGPUResources {
  * Performance, visibility, and synchronization metrics
  */
 export interface ChunkMetrics {
-  // Timing
-  readonly createdAt: number;
-  generationTime: number;
   lastAccessed: number;
 }
 
@@ -117,10 +113,6 @@ export interface StreamingRequest {
   readonly coord: ChunkCoord;
   /** Lower score = higher priority. Updated by reprioritize(). */
   score: number;
-  /** Raw world-space distance to camera at enqueue time. */
-  readonly distanceAtEnqueue: number;
-  /** Monotonic timestamp when this request was created. */
-  readonly enqueuedAt: number;
   /** Number of generation attempts (for retry throttling). */
   attempts: number;
 }

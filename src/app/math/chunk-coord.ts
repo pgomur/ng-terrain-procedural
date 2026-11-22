@@ -10,7 +10,7 @@ export function getChunkKey(coord: ChunkCoord): ChunkKey {
 /**
  * Calculate the origin (bottom left corner) of a chunk in world coordinates
  */
-export function getChunkOrigin(coord: ChunkCoord, chunkSize: number): WorldPosition {
+function getChunkOrigin(coord: ChunkCoord, chunkSize: number): WorldPosition {
   return {
     x: coord.x * chunkSize,
     y: 0,
@@ -80,7 +80,7 @@ export function isRenderableChunk(chunk: Chunk): boolean {
   return (chunk.state === 'ready' || chunk.state === 'unloading') && chunk.gpu !== null;
 }
 
-export const ANALYTIC_HEIGHT_MARGIN = 0.1;
+const ANALYTIC_HEIGHT_MARGIN = 0.1;
 
 export function analyticHeightRange(
   heightScale: number,

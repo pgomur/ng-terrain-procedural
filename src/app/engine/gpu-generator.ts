@@ -220,10 +220,6 @@ export class GPUGenerator<TOwner = unknown> {
     this.dirtyPages.clear();
   }
 
-  getAllocatedBytes(): number {
-    return this.getAtlasBytes() + this.getStagingBytes();
-  }
-
   getAtlasBytes(): number {
     let bytes = 0;
     for (const page of this.pages) {

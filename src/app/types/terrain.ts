@@ -14,7 +14,7 @@ export interface TerrainConfig {
 
   // Generation
   readonly GENERATION_BUDGET: number;
-  readonly UNLOAD_DELAY_FRAMES: number;
+  readonly UNLOAD_DELAY_MS: number;
 
   // Noise procedural (FBM)
   readonly NOISE_SEED: number;
@@ -37,11 +37,11 @@ export interface TerrainConfig {
 
   // Streaming / Buffer de Anticipación
   /**
-   * Frames into the future used for chunk preloading prediction.
+   * Seconds into the future used for chunk preloading prediction.
    * Higher = more aggressive look-ahead, at cost of VRAM.
-   * Range: [10, 120]. Default: 60 (≈1 s at 60 fps).
+   * Range: [0.15, 2]. Default: 1.
    */
-  readonly ANTICIPATION_FRAMES: number;
+  readonly ANTICIPATION_SECONDS: number;
   /**
    * Weight of camera velocity direction in the priority score.
    * 0 = pure distance, 1 = pure look-ahead. Default: 0.6.
@@ -92,7 +92,7 @@ export const DEFAULT_TERRAIN_CONFIG: Readonly<TerrainConfig> = {
   CHUNK_RESOLUTIONS: { 0: 65, 1: 33, 2: 17, 3: 9 },
   LOD_DISTANCES: [600, 1500, 3000],
   GENERATION_BUDGET: 16,
-  UNLOAD_DELAY_FRAMES: 60,
+  UNLOAD_DELAY_MS: 960,
   NOISE_SEED: 12345,
   NOISE_OCTAVES: 4,
   NOISE_PERSISTENCE: 0.5,
@@ -105,7 +105,7 @@ export const DEFAULT_TERRAIN_CONFIG: Readonly<TerrainConfig> = {
   TERRAIN_OFFSET_Y: 0,
   SEAM_FITTING_ENABLED: true,
   // Streaming / Buffer de Anticipación
-  ANTICIPATION_FRAMES: 60,
+  ANTICIPATION_SECONDS: 1,
   VELOCITY_WEIGHT: 0.6,
   GENERATION_QUEUE_CAPACITY: 256,
 } as const;

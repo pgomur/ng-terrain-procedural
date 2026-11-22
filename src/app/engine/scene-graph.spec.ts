@@ -13,7 +13,7 @@ const config: TerrainConfig = {
   CHUNK_SIZE: 64,
   LOD_DISTANCES: [70, 140, 260],
   GENERATION_QUEUE_CAPACITY: 128,
-  UNLOAD_DELAY_FRAMES: 2,
+  UNLOAD_DELAY_MS: 32,
   GENERATION_BUDGET: 16,
 };
 const heightFn = (x: number, z: number) => 40 + 25 * Math.sin(x * 0.037) * Math.cos(z * 0.029) + 0.01 * x;

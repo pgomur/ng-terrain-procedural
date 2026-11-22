@@ -148,7 +148,7 @@ export class StreamingPriorityQueue {
     vx: number,
     vz: number,
     speed: number,
-    anticipationFrames: number,
+    anticipationSeconds: number,
     velocityWeight: number,
     chunkSize: number,
   ): void {
@@ -157,7 +157,7 @@ export class StreamingPriorityQueue {
     const invSpeed = speed > 1e-3 ? 1 / speed : 0;
     const normVx = vx * invSpeed;
     const normVz = vz * invSpeed;
-    const lookAheadDistance = speed * (anticipationFrames / 60) * velocityWeight;
+    const lookAheadDistance = speed * anticipationSeconds * velocityWeight;
     const half = chunkSize / 2;
 
     for (const s of this.heap) {
@@ -169,18 +169,6 @@ export class StreamingPriorityQueue {
     }
 
     this.rebuild();
-  }
-
-  avgAnticipationGain(): number {
-    let totalGain = 0;
-    let count = 0;
-    for (const s of this.heap) {
-      if (s.distanceAtEnqueue > 0) {
-        totalGain += s.distanceAtEnqueue - s.score;
-        count++;
-      }
-    }
-    return count > 0 ? totalGain / count : 0;
   }
 
   clear(): void {
@@ -257,7 +245,6 @@ function retryDelayMs(attempts: number): number {
 }
 
 export interface ChunkManagerStats {
-  readonly activeCount: number;
   readonly readyCount: number;
   readonly unloadingCount: number;
   readonly errorCount: number;
@@ -266,9 +253,7 @@ export interface ChunkManagerStats {
   readonly pendingCount: number;
   readonly exactBoundsCount: number;
   readonly heightsCachedCount: number;
-  readonly updateTimeMs: number;
   readonly streamingBufferUsage: number;
-  readonly anticipationScore: number;
 }
 
 interface DesiredChunk {
@@ -277,7 +262,6 @@ interface DesiredChunk {
   readonly spatialKey: string;
 }
 
-const UNLOAD_FRAME_MS = 16;
 const MAX_LOD: ChunkLOD = 3;
 
 export class ChunkManager {
@@ -312,7 +296,6 @@ export class ChunkManager {
   private cameraX = 0;
   private cameraZ = 0;
   private hasCamera = false;
-  private lastUpdateTimeMs = 0;
 
   private collisionChunkX = Number.NaN;
   private collisionChunkZ = Number.NaN;
@@ -374,7 +357,7 @@ export class ChunkManager {
 
     if (this.enqueueDirty) {
       this.enqueueDirty = false;
-      this.enqueueNewChunks(frameStart);
+      this.enqueueNewChunks();
     }
 
     const velChanged =
@@ -388,7 +371,7 @@ export class ChunkManager {
         this.velocityTracker.vx,
         this.velocityTracker.vz,
         this.velocityTracker.speed,
-        this.config.ANTICIPATION_FRAMES,
+        this.config.ANTICIPATION_SECONDS,
         this.config.VELOCITY_WEIGHT,
         this.config.CHUNK_SIZE,
       );
@@ -405,8 +388,6 @@ export class ChunkManager {
       this.updateVisibility(frustum);
       this.chunksChanged = false;
     }
-
-    this.lastUpdateTimeMs = performance.now() - frameStart;
   }
 
   private refreshDesiredChunks(position: WorldPosition): void {
@@ -471,7 +452,7 @@ export class ChunkManager {
   }
 
   private cullAndRetry(now: number): void {
-    const unloadDelayMs = this.config.UNLOAD_DELAY_FRAMES * UNLOAD_FRAME_MS;
+    const unloadDelayMs = this.config.UNLOAD_DELAY_MS;
     let nextCullAt = Infinity;
 
     for (const [key, chunk] of this.chunks) {
@@ -485,7 +466,7 @@ export class ChunkManager {
         const failure = chunk.failure;
         if (!failure || now >= failure.retryAt) {
           this.chunks.delete(key);
-          this.queue.enqueue(this.createRequest(chunk.meta.coord, key, failure?.attempts ?? 1, now));
+          this.queue.enqueue(this.createRequest(chunk.meta.coord, key, failure?.attempts ?? 1));
           this.enqueueDirty = true;
         } else {
           nextCullAt = Math.min(nextCullAt, failure.retryAt);
@@ -579,7 +560,7 @@ export class ChunkManager {
     this.cullDirty = true;
   }
 
-  private createRequest(coord: ChunkCoord, key: ChunkKey, attempts: number, now: number): StreamingRequest {
+  private createRequest(coord: ChunkCoord, key: ChunkKey, attempts: number): StreamingRequest {
     let dist = Infinity;
     if (this.hasCamera) {
       const half = this.config.CHUNK_SIZE / 2;
@@ -591,19 +572,17 @@ export class ChunkManager {
       key,
       coord,
       score: dist,
-      distanceAtEnqueue: dist,
-      enqueuedAt: now,
       attempts,
     };
   }
 
-  private enqueueNewChunks(now: number): void {
+  private enqueueNewChunks(): void {
     for (const entry of this.desired) {
       const key = entry.key;
       if (this.chunks.has(key)) continue;
       if (this.queue.has(key)) continue;
 
-      if (!this.queue.enqueue(this.createRequest(entry.coord, key, 0, now))) this.enqueueDirty = true;
+      if (!this.queue.enqueue(this.createRequest(entry.coord, key, 0))) this.enqueueDirty = true;
     }
   }
 
@@ -644,19 +623,12 @@ export class ChunkManager {
       meta: {
         coord,
         spatialKey: spatialKeyOf(coord),
-        worldOrigin: {
-          x: coord.x * this.config.CHUNK_SIZE,
-          y: 0,
-          z: coord.z * this.config.CHUNK_SIZE,
-        },
         resolution: this.config.CHUNK_RESOLUTIONS[coord.lod],
       },
       bounds: this.analyticBounds(coord),
       state: 'generating',
       gpu: null,
       metrics: {
-        createdAt: now,
-        generationTime: 0,
         lastAccessed: now,
       },
     };
@@ -666,7 +638,6 @@ export class ChunkManager {
     if (this.chunks.get(getChunkKey(chunk.meta.coord)) !== chunk || !chunk.gpu) return;
 
     chunk.bounds = boundsFromHeights(chunk.meta.coord, this.config.CHUNK_SIZE, minHeight, maxHeight);
-    chunk.metrics.generationTime = performance.now() - chunk.metrics.createdAt;
     this.exactBounds.add(chunk);
     this.chunksChanged = true;
   }
@@ -770,7 +741,6 @@ export class ChunkManager {
     const capacity = this.config.GENERATION_QUEUE_CAPACITY;
 
     return {
-      activeCount: this.chunks.size,
       readyCount,
       unloadingCount,
       errorCount,
@@ -779,9 +749,7 @@ export class ChunkManager {
       pendingCount: this.queue.size,
       exactBoundsCount,
       heightsCachedCount,
-      updateTimeMs: this.lastUpdateTimeMs,
       streamingBufferUsage: capacity > 0 ? this.queue.size / capacity : 0,
-      anticipationScore: this.queue.avgAnticipationGain(),
     };
   }
 

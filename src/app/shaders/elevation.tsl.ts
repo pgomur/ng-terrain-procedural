@@ -23,12 +23,12 @@ import {
 } from 'three/tsl';
 import type { StorageBufferAttribute } from 'three/webgpu';
 
-export const NOISE_FREQUENCY = 0.001;
+const NOISE_FREQUENCY = 0.001;
 
 export const MAX_NOISE_OCTAVES = 12;
 
-export const BOUNDS_EMPTY_MIN_KEY = 0xffffffff;
-export const BOUNDS_EMPTY_MAX_KEY = 0;
+const BOUNDS_EMPTY_MIN_KEY = 0xffffffff;
+const BOUNDS_EMPTY_MAX_KEY = 0;
 
 const SEED_OFFSET_RANGE = 256;
 
@@ -122,7 +122,7 @@ export function createNoiseUniforms() {
 
 export type NoiseUniforms = ReturnType<typeof createNoiseUniforms>;
 
-export interface HeightKernelOptions {
+interface HeightKernelOptions {
   readonly resolution: number;
   readonly maxJobs: number;
   readonly heights: StorageBufferAttribute;

@@ -10,7 +10,7 @@ const config: TerrainConfig = {
   LOD_DISTANCES: [150, 300, 450],
   GENERATION_BUDGET: 4,
   GENERATION_QUEUE_CAPACITY: 32,
-  UNLOAD_DELAY_FRAMES: 2,
+  UNLOAD_DELAY_MS: 32,
 };
 const everything: FrustumPlanes = {
   normals: Array(6).fill({ x: 0, y: 0, z: 0 }),
@@ -51,8 +51,6 @@ const request = (x: number, score: number): StreamingRequest => ({
   key: `${x}:0:0` as ChunkKey,
   coord: { x, z: 0, lod: 0 },
   score,
-  distanceAtEnqueue: score,
-  enqueuedAt: 0,
   attempts: 0,
 });
 
@@ -114,7 +112,7 @@ describe('StreamingPriorityQueue', () => {
     const queue = new StreamingPriorityQueue(16);
     queue.enqueue(request(5, 0));
     queue.enqueue(request(-6, 0));
-    queue.reprioritize(0, 0, 100, 0, 100, 60, 1, 128);
+    queue.reprioritize(0, 0, 100, 0, 100, 1, 1, 128);
     const first = queue.dequeue()!;
     const dx = 5 * 128 + 64;
     const distance = Math.hypot(dx, 64);
@@ -229,7 +227,7 @@ describe('ChunkManager incremental culling', () => {
     ...config,
     GENERATION_BUDGET: 64,
     GENERATION_QUEUE_CAPACITY: 4096,
-    UNLOAD_DELAY_FRAMES: 20,
+    UNLOAD_DELAY_MS: 320,
   };
 
   afterEach(() => {
@@ -333,7 +331,7 @@ describe('ChunkManager incremental culling', () => {
     const unloading = manager.getStats().unloadingCount;
     expect(unloading).toBeGreaterThan(0);
 
-    const delayMs = quickConfig.UNLOAD_DELAY_FRAMES * 16;
+    const delayMs = quickConfig.UNLOAD_DELAY_MS;
     while (now < jumpedAt + delayMs - 64) await frame(5000);
     cull.mockClear();
     while (now < jumpedAt + delayMs - 32) await frame(5000);

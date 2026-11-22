@@ -197,10 +197,6 @@ export class SceneGraph {
     return count;
   }
 
-  getSeamCode(spatialKey: string): number | undefined {
-    return this.entries.get(spatialKey)?.seamCode;
-  }
-
   getGpuAttributes(): THREE.BufferAttribute[] {
     const attributes: THREE.BufferAttribute[] = [];
     for (const base of this.baseGeometries.values()) {

@@ -26,7 +26,6 @@ export interface TerrainEngineStats {
   readonly readyChunks: number;
   readonly unloadingChunks: number;
   readonly generatedPerSecond: number;
-  readonly exactBoundsChunks: number;
   readonly pendingChunks: number;
   readonly queueUsage: number;
   readonly failedChunks: number;
@@ -207,7 +206,6 @@ export class TerrainEngine {
 
       this.loadingStageSignal.set('terrain');
       this.initStateSignal.set('ready');
-      console.log('TerrainEngine initialized successfully');
 
       return true;
     } catch (error) {
@@ -618,7 +616,6 @@ export class TerrainEngine {
       readyChunks: chunkStats.readyCount,
       unloadingChunks: chunkStats.unloadingCount,
       generatedPerSecond: (((this.gpuGenerator?.generatedCount ?? 0) - this.statsStartGenerated) * 1000) / elapsedMs,
-      exactBoundsChunks: chunkStats.exactBoundsCount,
       pendingChunks: chunkStats.pendingCount,
       queueUsage: chunkStats.streamingBufferUsage,
       failedChunks: chunkStats.errorCount,

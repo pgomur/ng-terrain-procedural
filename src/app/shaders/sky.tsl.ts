@@ -74,7 +74,7 @@ export function skyColor(direction: Node<'vec3'>, sun: Vector3, options: SkyOpti
   return result;
 }
 
-export const SKY_RENDER_ORDER = Number.MAX_SAFE_INTEGER;
+const SKY_RENDER_ORDER = Number.MAX_SAFE_INTEGER;
 
 export function createSkyDome(sun: Vector3): Mesh {
   const material = new NodeMaterial();
