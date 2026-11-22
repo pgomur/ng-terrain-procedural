@@ -163,13 +163,13 @@ export class TerrainEngine {
       }
       this.renderer = renderer;
 
-      this.initScene();
+      const scene = this.initScene();
       this.initCamera();
       this.initLights();
 
-      this.gpuGenerator = new GPUGenerator<Chunk>(this.renderer!, this.config);
+      this.gpuGenerator = new GPUGenerator<Chunk>(this.renderer, this.config);
       this.chunkManager = new ChunkManager(this.config, this.gpuGenerator);
-      this.sceneGraph = new SceneGraph(this.scene!, this.config, this.gpuGenerator);
+      this.sceneGraph = new SceneGraph(scene, this.config, this.gpuGenerator);
 
       this.prewarmPipelines();
 
@@ -188,11 +188,12 @@ export class TerrainEngine {
   }
 
   private async createRenderer(canvas: HTMLCanvasElement): Promise<WebGPURenderer> {
-    if (!navigator.gpu) {
+    const gpu = navigator.gpu as GPU | undefined;
+    if (!gpu) {
       throw new Error('WebGPU is not supported in this browser');
     }
 
-    const adapter = await navigator.gpu.requestAdapter({
+    const adapter = await gpu.requestAdapter({
       powerPreference: 'high-performance',
     });
 
@@ -231,15 +232,16 @@ export class TerrainEngine {
     return this.loadRadius() - this.config.CHUNK_SIZE * Math.SQRT1_2;
   }
 
-  private initScene(): void {
-    this.scene = new THREE.Scene();
+  private initScene(): THREE.Scene {
+    const scene = new THREE.Scene();
+    this.scene = scene;
 
     this.fogFar = this.worldEdgeDistance();
     this.fogNear = Math.min(this.config.LOD_DISTANCES[1], this.fogFar * 0.5);
 
     const distance = positionView.length();
     const viewDirection = cameraWorldMatrix.mul(vec4(positionView, 0.0)).xyz.normalize();
-    Object.assign(this.scene, {
+    Object.assign(scene, {
       backgroundNode: skyColor(normalWorldGeometry.normalize(), SUN_DIRECTION, {
         sunDisk: true,
         clouds: true,
@@ -249,6 +251,8 @@ export class TerrainEngine {
         smoothstep(uniform(this.fogNear), uniform(this.fogFar), distance),
       ),
     });
+
+    return scene;
   }
 
   private initCamera(): void {
@@ -437,8 +441,8 @@ export class TerrainEngine {
       !this.camera.projectionMatrix.equals(this.lastProjectionMatrix);
 
     if (viewChanged) {
-      this.refreshCameraState();
-      this.refreshFrustumPlanes();
+      this.refreshCameraState(this.camera);
+      this.refreshFrustumPlanes(this.camera);
       this.lastCameraMatrix.copy(this.camera.matrixWorld);
       this.lastProjectionMatrix.copy(this.camera.projectionMatrix);
       this.viewInitialized = true;
@@ -447,7 +451,9 @@ export class TerrainEngine {
     this.updateSun();
 
     const streamingStart = performance.now();
-    this.chunkManager.update(this.cameraState!, this.frustumPlanes, viewChanged);
+    if (!this.cameraState) return;
+
+    this.chunkManager.update(this.cameraState, this.frustumPlanes, viewChanged);
 
     this.sceneGraph.sync(
       this.chunkManager.getChunks(),
@@ -459,28 +465,24 @@ export class TerrainEngine {
     this.statsStreamingMs += performance.now() - streamingStart;
   }
 
-  private refreshCameraState(): void {
-    const camera = this.camera!;
-
+  private refreshCameraState(camera: THREE.PerspectiveCamera): void {
     this.forward.set(0, 0, -1).applyQuaternion(camera.quaternion);
     this.right.set(1, 0, 0).applyQuaternion(camera.quaternion);
     this.viewProjection.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
 
-    if (!this.cameraState) {
-      this.cameraState = {
-        position: camera.position,
-        forward: this.forward,
-        up: camera.up,
-        right: this.right,
-        fov: 0,
-        aspect: 0,
-        near: 0,
-        far: 0,
-        viewMatrix: new Float32Array(16),
-        projectionMatrix: new Float32Array(16),
-        viewProjectionMatrix: new Float32Array(16),
-      };
-    }
+    this.cameraState ??= {
+      position: camera.position,
+      forward: this.forward,
+      up: camera.up,
+      right: this.right,
+      fov: 0,
+      aspect: 0,
+      near: 0,
+      far: 0,
+      viewMatrix: new Float32Array(16),
+      projectionMatrix: new Float32Array(16),
+      viewProjectionMatrix: new Float32Array(16),
+    };
 
     const state = this.cameraState;
     state.fov = THREE.MathUtils.degToRad(camera.fov);
@@ -496,9 +498,7 @@ export class TerrainEngine {
    * Extracts the frustum planes of the current camera.
    * Uses Three.js native infrastructure for robustness with WebGPU.
    */
-  private refreshFrustumPlanes(): void {
-    const camera = this.camera!;
-
+  private refreshFrustumPlanes(camera: THREE.PerspectiveCamera): void {
     this.frustum.setFromProjectionMatrix(this.viewProjection, camera.coordinateSystem, camera.reversedDepth);
 
     for (let i = 0; i < 6; i++) {
@@ -516,7 +516,7 @@ export class TerrainEngine {
 
     if (this.statsWindowStart < 0) {
       this.statsWindowStart = time;
-      this.resetStatsWindow();
+      this.resetStatsWindow(this.camera.position);
       return;
     }
 
@@ -531,16 +531,16 @@ export class TerrainEngine {
     this.publishStats(elapsed);
 
     this.statsWindowStart = time;
-    this.resetStatsWindow();
+    this.resetStatsWindow(this.camera.position);
   }
 
-  private resetStatsWindow(): void {
+  private resetStatsWindow(position: THREE.Vector3): void {
     this.statsFrames = 0;
     this.statsCpuMs = 0;
     this.statsMaxFrameMs = 0;
     this.statsStreamingMs = 0;
     this.statsDistance = 0;
-    this.statsLastPosition.copy(this.camera!.position);
+    this.statsLastPosition.copy(position);
     this.statsStartGenerated = this.gpuGenerator?.generatedCount ?? 0;
   }
 

@@ -143,7 +143,7 @@ export class SceneGraph {
 
     for (const key of visibilityToggled) {
       const entry = this.entries.get(key.slice(0, key.lastIndexOf(':')));
-      if (!entry || entry.chunkKey !== key) continue;
+      if (entry?.chunkKey !== key) continue;
       const visible = visibleKeys.has(key);
       if (entry.visible !== visible) {
         entry.visible = visible;
@@ -175,7 +175,7 @@ export class SceneGraph {
     const qz = Math.round(z / step) * step;
     const qr = radius + step;
     const current = this.shadowRegion;
-    if (current && current.x === qx && current.z === qz && current.radius === qr) return;
+    if (current?.x === qx && current.z === qz && current.radius === qr) return;
 
     this.shadowRegion = { x: qx, z: qz, radius: qr };
     for (const batch of this.batches.values()) batch.shadowDirty = true;
@@ -254,7 +254,7 @@ export class SceneGraph {
     const best = this.selectBest(spatialKey, chunks);
     const entry = this.entries.get(spatialKey);
 
-    if (!best || !best.gpu) {
+    if (!best?.gpu) {
       if (entry) this.removeEntry(entry);
       return;
     }
@@ -263,8 +263,7 @@ export class SceneGraph {
     const gpu = best.gpu;
 
     if (
-      entry &&
-      entry.chunkKey === chunkKey &&
+      entry?.chunkKey === chunkKey &&
       entry.pageId === gpu.pageId &&
       entry.slot === gpu.slot &&
       entry.generation === gpu.generation

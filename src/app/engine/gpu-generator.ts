@@ -127,8 +127,8 @@ export class GPUGenerator<TOwner = unknown> {
     for (const resolution of resolutions) {
       const page = this.acquirePage(resolution);
       page.kernels.jobCount.value = 0;
-      this.renderer.compute(page.kernels.reset, 1);
-      this.renderer.compute(page.kernels.main, 1);
+      void this.renderer.compute(page.kernels.reset, 1);
+      void this.renderer.compute(page.kernels.main, 1);
     }
   }
 
@@ -163,7 +163,8 @@ export class GPUGenerator<TOwner = unknown> {
       this.flushPage(page);
     }
 
-    const slot = page.freeSlots.pop()!;
+    const slot = page.freeSlots.pop();
+    if (slot === undefined) throw new Error('Height page has no free slot');
     const generation = page.generations[slot];
     page.owners[slot] = owner;
 
@@ -183,8 +184,8 @@ export class GPUGenerator<TOwner = unknown> {
   }
 
   release(resources: ChunkGPUResources): void {
-    const page = this.pages[resources.pageId];
-    if (!page || page.generations[resources.slot] !== resources.generation) return;
+    const page = this.pages.at(resources.pageId);
+    if (page?.generations[resources.slot] !== resources.generation) return;
 
     this.removeQueuedJob(page, resources.slot);
 
@@ -194,8 +195,8 @@ export class GPUGenerator<TOwner = unknown> {
   }
 
   requestHeights(resources: ChunkGPUResources, owner: TOwner): boolean {
-    const page = this.pages[resources.pageId];
-    if (!page || page.generations[resources.slot] !== resources.generation) return false;
+    const page = this.pages.at(resources.pageId);
+    if (page?.generations[resources.slot] !== resources.generation) return false;
 
     page.heightRequests.push({ slot: resources.slot, generation: resources.generation, owner });
     this.dirtyPages.add(page);
@@ -309,8 +310,8 @@ export class GPUGenerator<TOwner = unknown> {
     page.jobs.needsUpdate = true;
     page.kernels.jobCount.value = count;
 
-    this.renderer.compute(page.kernels.reset, count);
-    this.renderer.compute(page.kernels.main, count * page.kernels.verticesPerChunk);
+    void this.renderer.compute(page.kernels.reset, count);
+    void this.renderer.compute(page.kernels.main, count * page.kernels.verticesPerChunk);
 
     page.jobCount = 0;
   }
@@ -344,7 +345,7 @@ export class GPUGenerator<TOwner = unknown> {
           this.listener?.onBounds(item.owner, minHeight, maxHeight);
         }
       })
-      .catch((error) => {
+      .catch((error: unknown) => {
         console.error('[GPUGenerator] Bounds readback failed:', error);
         page.boundsPending.push(...batch);
       })
@@ -376,7 +377,7 @@ export class GPUGenerator<TOwner = unknown> {
           const valid = page.generations[request.slot] === request.generation;
           this.listener?.onHeights(request.owner, valid ? new Float32Array(buffer) : null);
         })
-        .catch((error) => {
+        .catch((error: unknown) => {
           console.error('[GPUGenerator] Height readback failed:', error);
           if (!this.disposed) this.listener?.onHeights(request.owner, null);
         });
@@ -418,7 +419,8 @@ export class GPUGenerator<TOwner = unknown> {
 
   private acquireStaging(device: GPUDevice, size: number): GPUBuffer {
     const pool = this.stagingPool.get(size);
-    if (pool && pool.length > 0) return pool.pop()!;
+    const pooled = pool?.pop();
+    if (pooled) return pooled;
     return device.createBuffer({ size, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
   }
 

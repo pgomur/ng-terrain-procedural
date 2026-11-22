@@ -38,8 +38,8 @@ describe('TerrainEngine viewport sizing', () => {
         constructor(callback: ResizeObserverCallback) {
           resizeCallback = callback;
         }
-        observe(): void {}
-        disconnect(): void {}
+        readonly observe = vi.fn();
+        readonly disconnect = vi.fn();
       },
     );
     setPixelRatio(1);

@@ -53,7 +53,7 @@ export function distanceToChunk(cameraPos: WorldPosition, chunkCenter: WorldPosi
  * More stringent test: AABB (Axis-Aligned Bounding Box) vs. Frustum
  * More accurate than a sphere but more expensive
  */
-export function intersectsFrustumAABB(bounds: ChunkBounds, planes: FrustumPlanes, epsilon: number = 8.0): boolean {
+export function intersectsFrustumAABB(bounds: ChunkBounds, planes: FrustumPlanes, epsilon = 8.0): boolean {
   for (let i = 0; i < 6; i++) {
     const normal = planes.normals[i];
     const constant = planes.constants[i];

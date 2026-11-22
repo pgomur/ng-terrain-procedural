@@ -6,7 +6,7 @@ export type GenerationOutcome = 'ok' | 'fail';
 export type GenerationBehaviour = (key: ChunkKey, attempt: number) => GenerationOutcome;
 export type HeightFunction = (x: number, z: number) => number;
 
-export const coordKey = (c: ChunkCoord) => `${c.x}:${c.z}:${c.lod}` as ChunkKey;
+export const coordKey = (c: ChunkCoord): ChunkKey => `${c.x}:${c.z}:${c.lod}`;
 
 interface Owner {
   readonly meta: { readonly coord: ChunkCoord };

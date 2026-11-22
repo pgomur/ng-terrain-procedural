@@ -59,9 +59,11 @@ export class TerrainComponent implements AfterViewInit, OnDestroy {
     return CARDINALS[Math.round(headingDeg / 45) % CARDINALS.length];
   }
 
-  async ngAfterViewInit(): Promise<void> {
-    const canvas = this.canvasRef().nativeElement;
+  ngAfterViewInit(): void {
+    void this.startEngine(this.canvasRef().nativeElement);
+  }
 
+  private async startEngine(canvas: HTMLCanvasElement): Promise<void> {
     const finalConfig: TerrainConfig = {
       ...this.globalConfig,
       ...this.configOverrides(),
@@ -117,16 +119,13 @@ export class TerrainComponent implements AfterViewInit, OnDestroy {
       this.cameraPitch = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, this.cameraPitch));
     };
 
-    const onClick = async () => {
-      if (!this.isPointerLocked()) {
-        try {
-          if (canvas.requestPointerLock) {
-            await canvas.requestPointerLock();
-          }
-        } catch (e) {
-          console.warn('The pointer lock could not be established:', e);
-        }
-      }
+    const onClick = () => {
+      if (this.isPointerLocked()) return;
+      Promise.resolve()
+        .then(() => canvas.requestPointerLock())
+        .catch((error: unknown) => {
+          console.warn('The pointer lock could not be established:', error);
+        });
     };
 
     const onPointerLockChange = () => {

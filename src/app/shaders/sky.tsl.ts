@@ -67,5 +67,5 @@ export function skyColor(direction: Node<'vec3'>, sun: Vector3, options: SkyOpti
     result = mix(result, cloud, coverage);
   }
 
-  return result as Node<'vec3'>;
+  return result;
 }

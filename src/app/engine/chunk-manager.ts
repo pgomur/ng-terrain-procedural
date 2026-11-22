@@ -130,8 +130,7 @@ export class StreamingPriorityQueue {
 
   retainOnly(keep: ReadonlySet<ChunkKey>): void {
     let write = 0;
-    for (let read = 0; read < this.heap.length; read++) {
-      const req = this.heap[read];
+    for (const req of this.heap) {
       if (keep.has(req.key)) {
         this.heap[write++] = req;
       } else {
@@ -161,8 +160,7 @@ export class StreamingPriorityQueue {
     const lookAheadDistance = speed * (anticipationFrames / 60) * velocityWeight;
     const half = chunkSize / 2;
 
-    for (let i = 0; i < this.heap.length; i++) {
-      const s = this.heap[i];
+    for (const s of this.heap) {
       const dx = s.coord.x * chunkSize + half - camX;
       const dz = s.coord.z * chunkSize + half - camZ;
       const dist = Math.sqrt(dx * dx + dz * dz) || 1;
@@ -176,8 +174,7 @@ export class StreamingPriorityQueue {
   avgAnticipationGain(): number {
     let totalGain = 0;
     let count = 0;
-    for (let i = 0; i < this.heap.length; i++) {
-      const s = this.heap[i];
+    for (const s of this.heap) {
       if (s.distanceAtEnqueue > 0) {
         totalGain += s.distanceAtEnqueue - s.score;
         count++;
@@ -204,13 +201,12 @@ export class StreamingPriorityQueue {
   private removeAt(i: number): void {
     const removed = this.heap[i];
     this.index.delete(removed.key);
-    const last = this.heap.pop()!;
-    if (i < this.heap.length) {
-      this.heap[i] = last;
-      this.index.set(last.key, i);
-      this.siftDown(i);
-      this.siftUp(i);
-    }
+    const last = this.heap.pop();
+    if (last === undefined || i >= this.heap.length) return;
+    this.heap[i] = last;
+    this.index.set(last.key, i);
+    this.siftDown(i);
+    this.siftUp(i);
   }
 
   private rebuild(): void {
@@ -495,8 +491,8 @@ export class ChunkManager {
       const desiredLOD = this.desiredLODByCoord.get(spatialKeyOf(chunk.meta.coord));
 
       if (desiredLOD !== undefined) {
-        const replacement = this.chunks.get(`${chunk.meta.coord.x}:${chunk.meta.coord.z}:${desiredLOD}` as ChunkKey);
-        if (!replacement || replacement.state !== 'ready') {
+        const replacement = this.chunks.get(`${chunk.meta.coord.x}:${chunk.meta.coord.z}:${desiredLOD}`);
+        if (replacement?.state !== 'ready') {
           chunk.metrics.lastAccessed = now;
           continue;
         }
@@ -682,7 +678,7 @@ export class ChunkManager {
     for (let dz = -1; dz <= 1; dz++) {
       for (let dx = -1; dx <= 1; dx++) {
         const chunk = this.findSurfaceChunk(chunkX + dx, chunkZ + dz, false);
-        if (!chunk || !chunk.gpu || chunk.heights || this.pendingHeights.has(chunk)) continue;
+        if (!chunk?.gpu || chunk.heights || this.pendingHeights.has(chunk)) continue;
         if (this.gpuGenerator.requestHeights(chunk.gpu, chunk)) {
           this.pendingHeights.add(chunk);
         }
@@ -694,7 +690,7 @@ export class ChunkManager {
     let fallback: Chunk | undefined;
     for (let lod = 0; lod <= MAX_LOD; lod++) {
       const chunk = this.chunks.get(`${chunkX}:${chunkZ}:${lod}` as ChunkKey);
-      if (!chunk || !chunk.gpu) continue;
+      if (!chunk?.gpu) continue;
       if (requireHeights && !chunk.heights) continue;
       if (chunk.state === 'ready') return chunk;
       if (!fallback && chunk.state === 'unloading') fallback = chunk;
@@ -769,7 +765,7 @@ export class ChunkManager {
     const chunkZ = Math.floor(z / size);
 
     const target = this.findSurfaceChunk(chunkX, chunkZ, true);
-    if (!target || !target.heights) return null;
+    if (!target?.heights) return null;
 
     const res = target.meta.resolution;
     const cellSize = size / (res - 1);

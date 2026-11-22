@@ -150,8 +150,8 @@ describe('ChunkManager', () => {
     );
     const manager = createManager(generator);
     expect(await runUntilSettled(manager, cameraAt(0, 0))).toBeGreaterThan(0);
-    expect(manager.getChunks().get('0:0:0' as ChunkKey)?.state).toBe('ready');
-    expect(generator.attempts.get('0:0:0' as ChunkKey)).toBe(4);
+    expect(manager.getChunks().get('0:0:0')?.state).toBe('ready');
+    expect(generator.attempts.get('0:0:0')).toBe(4);
     expect(errors).toHaveBeenCalledTimes(3);
     expect(generator.live.size).toBe(slotsHeld(manager));
   }, 30_000);
@@ -185,7 +185,7 @@ describe('ChunkManager', () => {
       () => 'ok',
       (x, z) => 10 + x * 0.01 + z * 0.02,
     );
-    generator.failHeightsOnce.add('0:0:0' as ChunkKey);
+    generator.failHeightsOnce.add('0:0:0');
     const manager = createManager(generator);
     await runUntilSettled(manager, cameraAt(10, 10));
     for (let frame = 0; frame < 20; frame++) {
@@ -199,7 +199,11 @@ describe('ChunkManager', () => {
 
   it('survives a long flight without leaks, with a bounded queue', async () => {
     const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    const failsFirst = (key: string) => [...key].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7) % 7 === 0;
+    const failsFirst = (key: string) => {
+      let hash = 7;
+      for (let i = 0; i < key.length; i++) hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
+      return hash % 7 === 0;
+    };
     const generator = new CpuHeightGenerator(config, (key, attempt) =>
       attempt === 1 && failsFirst(key) ? 'fail' : 'ok',
     );
