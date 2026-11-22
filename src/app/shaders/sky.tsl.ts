@@ -1,19 +1,23 @@
 import {
+  cameraProjectionMatrix,
   color,
   dot,
   float,
   max,
   mix,
+  modelViewMatrix,
   mx_fractal_noise_float,
+  positionLocal,
   pow,
   smoothstep,
   step,
   time,
   vec2,
   vec3,
+  vec4,
 } from 'three/tsl';
-import type { Vector3 } from 'three';
-import type { Node } from 'three/webgpu';
+import { BackSide, Mesh, SphereGeometry, type Vector3 } from 'three';
+import { NodeMaterial, type Node } from 'three/webgpu';
 
 export const SKY_HORIZON_COLOR = 0xd4e4ef;
 
@@ -68,4 +72,27 @@ export function skyColor(direction: Node<'vec3'>, sun: Vector3, options: SkyOpti
   }
 
   return result;
+}
+
+export const SKY_RENDER_ORDER = Number.MAX_SAFE_INTEGER;
+
+export function createSkyDome(sun: Vector3): Mesh {
+  const material = new NodeMaterial();
+  material.name = 'SkyDome';
+  material.side = BackSide;
+  material.depthTest = true;
+  material.depthWrite = false;
+  material.fog = false;
+  material.lights = false;
+
+  const viewPosition = modelViewMatrix.mul(vec4(positionLocal, 0.0));
+  const clipPosition = cameraProjectionMatrix.mul(vec4(viewPosition.xyz, 1.0));
+  material.vertexNode = clipPosition.setZ(clipPosition.w);
+  material.colorNode = vec4(skyColor(positionLocal.normalize(), sun, { sunDisk: true, clouds: true }), 1.0);
+
+  const dome = new Mesh(new SphereGeometry(1, 32, 32), material);
+  dome.name = 'SkyDome';
+  dome.frustumCulled = false;
+  dome.renderOrder = SKY_RENDER_ORDER;
+  return dome;
 }

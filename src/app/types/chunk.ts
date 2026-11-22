@@ -38,6 +38,7 @@ export type ChunkState =
  */
 export interface ChunkMeta {
   readonly coord: ChunkCoord;
+  readonly spatialKey: string;
   readonly worldOrigin: WorldPosition;
   readonly resolution: number;
 }

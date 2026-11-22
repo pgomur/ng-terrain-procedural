@@ -1,12 +1,12 @@
 import { Injectable, signal, computed } from '@angular/core';
 import * as THREE from 'three';
 import { WebGPURenderer } from 'three/webgpu';
-import { cameraWorldMatrix, fog, normalWorldGeometry, positionView, smoothstep, uniform, vec4 } from 'three/tsl';
+import { cameraWorldMatrix, fog, positionView, smoothstep, uniform, vec4 } from 'three/tsl';
 
 import { ChunkManager } from './chunk-manager';
 import { GPUGenerator } from './gpu-generator';
 import { SceneGraph, SHADOW_CASTER_LAYER } from './scene-graph';
-import { SKY_HORIZON_COLOR, skyColor } from '../shaders/sky.tsl';
+import { SKY_HORIZON_COLOR, createSkyDome, skyColor } from '../shaders/sky.tsl';
 import { TerrainConfig, DEFAULT_TERRAIN_CONFIG, EngineInitState, CameraState } from '../types/terrain';
 import { Chunk, FrustumPlanes, WorldPosition } from '../types/chunk';
 
@@ -274,11 +274,8 @@ export class TerrainEngine {
 
     const distance = positionView.length();
     const viewDirection = cameraWorldMatrix.mul(vec4(positionView, 0.0)).xyz.normalize();
+    scene.add(createSkyDome(SUN_DIRECTION));
     Object.assign(scene, {
-      backgroundNode: skyColor(normalWorldGeometry.normalize(), SUN_DIRECTION, {
-        sunDisk: true,
-        clouds: true,
-      }),
       fogNode: fog(
         skyColor(viewDirection, SUN_DIRECTION, { sunDisk: false, clouds: false }),
         smoothstep(uniform(this.fogNear), uniform(this.fogFar), distance),

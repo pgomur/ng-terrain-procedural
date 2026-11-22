@@ -274,6 +274,7 @@ export interface ChunkManagerStats {
 interface DesiredChunk {
   readonly coord: ChunkCoord;
   readonly key: ChunkKey;
+  readonly spatialKey: string;
 }
 
 const UNLOAD_FRAME_MS = 16;
@@ -291,6 +292,9 @@ export class ChunkManager {
   private readonly exactBounds = new WeakSet<Chunk>();
   private readonly pendingHeights = new Set<Chunk>();
   private chunksChanged = true;
+  private cullDirty = true;
+  private nextCullAt = Infinity;
+  private enqueueDirty = true;
 
   private readonly velocityTracker = new CameraVelocityTracker(0.15);
   private readonly queue: StreamingPriorityQueue;
@@ -302,7 +306,7 @@ export class ChunkManager {
 
   private desired: DesiredChunk[] = [];
   private readonly desiredKeys = new Set<ChunkKey>();
-  private readonly desiredLODByCoord = new Map<string, ChunkLOD>();
+  private readonly desiredByCoord = new Map<string, DesiredChunk>();
   private readonly CACHE_THRESHOLD = 0.1;
 
   private cameraX = 0;
@@ -360,12 +364,18 @@ export class ChunkManager {
 
     this.refreshDesiredChunks(position);
 
-    this.cullAndRetry(frameStart);
-    this.releasePendingKeys();
+    if (this.cullDirty || frameStart >= this.nextCullAt) {
+      this.cullDirty = false;
+      this.cullAndRetry(frameStart);
+      this.releasePendingKeys();
+    }
 
     this.queue.retainOnly(this.desiredKeys);
 
-    this.enqueueNewChunks(frameStart);
+    if (this.enqueueDirty) {
+      this.enqueueDirty = false;
+      this.enqueueNewChunks(frameStart);
+    }
 
     const velChanged =
       Math.abs(this.velocityTracker.vx - this.lastVelocityX) > this.VELOCITY_CHANGE_THRESHOLD ||
@@ -412,11 +422,13 @@ export class ChunkManager {
     this.desired = this.calculateDesiredChunks(position);
 
     this.desiredKeys.clear();
-    this.desiredLODByCoord.clear();
+    this.desiredByCoord.clear();
     for (const entry of this.desired) {
       this.desiredKeys.add(entry.key);
-      this.desiredLODByCoord.set(spatialKeyOf(entry.coord), entry.coord.lod);
+      this.desiredByCoord.set(entry.spatialKey, entry);
     }
+    this.cullDirty = true;
+    this.enqueueDirty = true;
   }
 
   private calculateDesiredChunks(position: WorldPosition): DesiredChunk[] {
@@ -444,7 +456,7 @@ export class ChunkManager {
         if (dist < maxDist) {
           const lod = selectLODForDistance(dist, this.config.LOD_DISTANCES);
           const coord: ChunkCoord = { x: chunkX, z: chunkZ, lod };
-          desired.push({ coord, key: getChunkKey(coord) });
+          desired.push({ coord, key: getChunkKey(coord), spatialKey: spatialKeyOf(coord) });
         }
       }
 
@@ -459,6 +471,9 @@ export class ChunkManager {
   }
 
   private cullAndRetry(now: number): void {
+    const unloadDelayMs = this.config.UNLOAD_DELAY_FRAMES * UNLOAD_FRAME_MS;
+    let nextCullAt = Infinity;
+
     for (const [key, chunk] of this.chunks) {
       const isDesired = this.desiredKeys.has(key);
 
@@ -471,6 +486,9 @@ export class ChunkManager {
         if (!failure || now >= failure.retryAt) {
           this.chunks.delete(key);
           this.queue.enqueue(this.createRequest(chunk.meta.coord, key, failure?.attempts ?? 1, now));
+          this.enqueueDirty = true;
+        } else {
+          nextCullAt = Math.min(nextCullAt, failure.retryAt);
         }
         continue;
       }
@@ -483,15 +501,16 @@ export class ChunkManager {
             this.markRenderChange(chunk);
           } else {
             this.chunks.delete(key);
+            this.enqueueDirty = true;
           }
         }
         continue;
       }
 
-      const desiredLOD = this.desiredLODByCoord.get(spatialKeyOf(chunk.meta.coord));
+      const desired = this.desiredByCoord.get(chunk.meta.spatialKey);
 
-      if (desiredLOD !== undefined) {
-        const replacement = this.chunks.get(`${chunk.meta.coord.x}:${chunk.meta.coord.z}:${desiredLOD}`);
+      if (desired) {
+        const replacement = this.chunks.get(desired.key);
         if (replacement?.state !== 'ready') {
           chunk.metrics.lastAccessed = now;
           continue;
@@ -499,17 +518,21 @@ export class ChunkManager {
       }
 
       if (chunk.state === 'unloading') {
-        const framesPassed = (now - chunk.metrics.lastAccessed) / UNLOAD_FRAME_MS;
-        if (framesPassed > this.config.UNLOAD_DELAY_FRAMES) {
+        if (now - chunk.metrics.lastAccessed > unloadDelayMs) {
           this.releaseKeys.add(key);
+        } else {
+          nextCullAt = Math.min(nextCullAt, chunk.metrics.lastAccessed + unloadDelayMs);
         }
       } else {
         const wasRenderable = isRenderableChunk(chunk);
         chunk.state = 'unloading';
         chunk.metrics.lastAccessed = now;
+        nextCullAt = Math.min(nextCullAt, now + unloadDelayMs);
         if (wasRenderable) this.markRenderChange(chunk);
       }
     }
+
+    this.nextCullAt = nextCullAt;
 
     // Evict excess if over MAX_CHUNKS
     if (this.chunks.size - this.releaseKeys.size > this.config.MAX_CHUNKS) {
@@ -551,8 +574,9 @@ export class ChunkManager {
   }
 
   private markRenderChange(chunk: Chunk): void {
-    this.dirtyCoords.add(spatialKeyOf(chunk.meta.coord));
+    this.dirtyCoords.add(chunk.meta.spatialKey);
     this.chunksChanged = true;
+    this.cullDirty = true;
   }
 
   private createRequest(coord: ChunkCoord, key: ChunkKey, attempts: number, now: number): StreamingRequest {
@@ -579,7 +603,7 @@ export class ChunkManager {
       if (this.chunks.has(key)) continue;
       if (this.queue.has(key)) continue;
 
-      this.queue.enqueue(this.createRequest(entry.coord, key, 0, now));
+      if (!this.queue.enqueue(this.createRequest(entry.coord, key, 0, now))) this.enqueueDirty = true;
     }
   }
 
@@ -606,6 +630,7 @@ export class ChunkManager {
         console.error(`[ChunkManager] Error generating chunk ${req.key} (attempt ${attempts}):`, error);
         chunk.state = 'error';
         chunk.failure = { attempts, retryAt: now + retryDelayMs(attempts) };
+        this.cullDirty = true;
       }
 
       generated++;
@@ -618,6 +643,7 @@ export class ChunkManager {
     return {
       meta: {
         coord,
+        spatialKey: spatialKeyOf(coord),
         worldOrigin: {
           x: coord.x * this.config.CHUNK_SIZE,
           y: 0,
@@ -762,10 +788,10 @@ export class ChunkManager {
   getLoadProgress(maxLod: ChunkLOD): { readonly ready: number; readonly wanted: number } {
     let ready = 0;
     let wanted = 0;
-    for (const [spatialKey, lod] of this.desiredLODByCoord) {
-      if (lod > maxLod) continue;
+    for (const entry of this.desiredByCoord.values()) {
+      if (entry.coord.lod > maxLod) continue;
       wanted++;
-      if (this.chunks.get(`${spatialKey}:${lod}` as ChunkKey)?.state === 'ready') ready++;
+      if (this.chunks.get(entry.key)?.state === 'ready') ready++;
     }
     return { ready, wanted };
   }
@@ -829,13 +855,16 @@ export class ChunkManager {
     this.queue.clear();
     this.desired = [];
     this.desiredKeys.clear();
-    this.desiredLODByCoord.clear();
+    this.desiredByCoord.clear();
     this.lastCameraPos = { x: Infinity, z: Infinity };
     this.velocityTracker.reset();
     this.collisionChunkX = Number.NaN;
     this.collisionChunkZ = Number.NaN;
     this.collisionDirty = true;
     this.chunksChanged = true;
+    this.cullDirty = true;
+    this.enqueueDirty = true;
+    this.nextCullAt = Infinity;
   }
 
   dispose(): void {

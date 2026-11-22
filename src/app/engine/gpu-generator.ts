@@ -29,8 +29,11 @@ function stagingBucket(byteLength: number): number {
 
 interface BackendInternals {
   readonly device?: GPUDevice;
+  has?(resource: object): boolean;
   get?(resource: object): { readonly buffer?: GPUBuffer } | undefined;
 }
+
+const RELEASED_HEIGHTS = new Float32Array(0);
 
 export interface HeightListener<TOwner> {
   onBounds(owner: TOwner, minHeight: number, maxHeight: number): void;
@@ -51,6 +54,8 @@ interface PendingSlot<TOwner> {
 }
 
 interface PageState<TOwner> extends HeightPage {
+  readonly heightBytes: number;
+  heightCopyReleased: boolean;
   readonly bounds: StorageBufferAttribute;
   readonly jobs: StorageBufferAttribute;
   readonly kernels: ReturnType<typeof createHeightKernels>;
@@ -129,6 +134,7 @@ export class GPUGenerator<TOwner = unknown> {
       page.kernels.jobCount.value = 0;
       void this.renderer.compute(page.kernels.reset, 1);
       void this.renderer.compute(page.kernels.main, 1);
+      this.releaseHeightCopy(page);
     }
   }
 
@@ -221,7 +227,7 @@ export class GPUGenerator<TOwner = unknown> {
   getAtlasBytes(): number {
     let bytes = 0;
     for (const page of this.pages) {
-      bytes += page.heights.array.byteLength + page.bounds.array.byteLength + page.jobs.array.byteLength;
+      bytes += page.heightBytes + page.bounds.array.byteLength + page.jobs.array.byteLength;
     }
     return bytes;
   }
@@ -272,6 +278,8 @@ export class GPUGenerator<TOwner = unknown> {
       resolution,
       capacity,
       heights,
+      heightBytes: heights.array.byteLength,
+      heightCopyReleased: false,
       bounds,
       jobs,
       kernels,
@@ -312,6 +320,7 @@ export class GPUGenerator<TOwner = unknown> {
 
     void this.renderer.compute(page.kernels.reset, count);
     void this.renderer.compute(page.kernels.main, count * page.kernels.verticesPerChunk);
+    this.releaseHeightCopy(page);
 
     page.jobCount = 0;
   }
@@ -411,6 +420,12 @@ export class GPUGenerator<TOwner = unknown> {
       if (staging.mapState === 'mapped') staging.unmap();
       this.releaseStaging(bucket, staging);
     }
+  }
+
+  private releaseHeightCopy(page: PageState<TOwner>): void {
+    if (page.heightCopyReleased || this.backendInternals()?.has?.(page.heights) !== true) return;
+    page.heights.array = RELEASED_HEIGHTS;
+    page.heightCopyReleased = true;
   }
 
   private backendInternals(): BackendInternals | undefined {
