@@ -223,3 +223,125 @@ describe('ChunkManager', () => {
     expect(manager.getStats().errorCount).toBe(0);
   }, 60_000);
 });
+
+describe('ChunkManager incremental culling', () => {
+  const quickConfig: TerrainConfig = {
+    ...config,
+    GENERATION_BUDGET: 64,
+    GENERATION_QUEUE_CAPACITY: 4096,
+    UNLOAD_DELAY_FRAMES: 20,
+  };
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    ['default limits', quickConfig],
+    ['eviction over MAX_CHUNKS', { ...quickConfig, MAX_CHUNKS: 240 }],
+  ])(
+    'produces exactly the same chunks, states and visibility as a full scan every frame (%s)',
+    async (_, cfg) => {
+      let now = 1000;
+      vi.spyOn(performance, 'now').mockImplementation(() => now);
+      vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+      const behaviour = (key: string, attempt: number) => {
+        let hash = 11;
+        for (let i = 0; i < key.length; i++) hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
+        return attempt <= 2 && hash % 9 === 0 ? 'fail' : 'ok';
+      };
+      const incremental = new ChunkManager(cfg, new CpuHeightGenerator(cfg, behaviour) as never);
+      const fullScan = new ChunkManager(cfg, new CpuHeightGenerator(cfg, behaviour) as never);
+      const forceFullScan = fullScan as unknown as { cullDirty: boolean; enqueueDirty: boolean };
+
+      const snapshot = (manager: ChunkManager) =>
+        [...manager.getChunks()]
+          .map(([key, chunk]) => `${key}=${chunk.state}${chunk.gpu ? '' : '-'}`)
+          .sort()
+          .join(',') +
+        '|' +
+        [...manager.getVisibleKeys()].sort().join(',');
+
+      let walk = 7;
+      const step = () => (walk = (walk * 1103515245 + 12345) >>> 0) / 2 ** 32;
+      let x = 0;
+      let z = 0;
+      let firstMismatch = '';
+      const seen = { unloading: 0, error: 0, released: 0, maxChunks: 0 };
+
+      for (let frame = 0; frame < 1200; frame++) {
+        const phase = frame % 200;
+        if (phase < 30) {
+          x += 9;
+          z += 4;
+        } else if (phase === 120) {
+          x += (step() - 0.5) * 3000;
+          z += (step() - 0.5) * 3000;
+        }
+
+        const before = incremental.getChunks().size;
+        forceFullScan.cullDirty = true;
+        forceFullScan.enqueueDirty = true;
+        incremental.update(cameraAt(x, z), everything);
+        fullScan.update(cameraAt(x, z), everything);
+        incremental.clearRenderChanges();
+        fullScan.clearRenderChanges();
+
+        const stats = incremental.getStats();
+        seen.unloading += stats.unloadingCount;
+        seen.error += stats.errorCount;
+        if (incremental.getChunks().size < before) seen.released++;
+        seen.maxChunks = Math.max(seen.maxChunks, incremental.getChunks().size);
+
+        if (!firstMismatch && snapshot(incremental) !== snapshot(fullScan)) firstMismatch = `frame ${frame}`;
+
+        now += 16;
+        await tick();
+      }
+
+      expect(firstMismatch).toBe('');
+      expect(seen.unloading).toBeGreaterThan(0);
+      expect(seen.error).toBeGreaterThan(0);
+      expect(seen.released).toBeGreaterThan(0);
+      if (cfg.MAX_CHUNKS < 1024) expect(seen.maxChunks).toBeGreaterThan(cfg.MAX_CHUNKS);
+    },
+    60_000,
+  );
+
+  it('skips the full scan while nothing changes and wakes up exactly when a chunk must unload', async () => {
+    let now = 1000;
+    vi.spyOn(performance, 'now').mockImplementation(() => now);
+    const manager = new ChunkManager(quickConfig, new CpuHeightGenerator(quickConfig) as never);
+    const internals = manager as unknown as { cullAndRetry(time: number): void };
+    const cull = vi.spyOn(internals, 'cullAndRetry');
+    const frame = async (x: number) => {
+      manager.update(cameraAt(x, 0), everything);
+      manager.clearRenderChanges();
+      now += 16;
+      await tick();
+    };
+
+    for (let i = 0; i < 40; i++) await frame(0);
+    cull.mockClear();
+    for (let i = 0; i < 60; i++) await frame(0);
+    expect(cull).not.toHaveBeenCalled();
+
+    await frame(5000);
+    await frame(5000);
+    const jumpedAt = now;
+    const unloading = manager.getStats().unloadingCount;
+    expect(unloading).toBeGreaterThan(0);
+
+    const delayMs = quickConfig.UNLOAD_DELAY_FRAMES * 16;
+    while (now < jumpedAt + delayMs - 64) await frame(5000);
+    cull.mockClear();
+    while (now < jumpedAt + delayMs - 32) await frame(5000);
+    expect(cull).not.toHaveBeenCalled();
+    expect(manager.getStats().unloadingCount).toBe(unloading);
+
+    for (let i = 0; i < 6; i++) await frame(5000);
+    expect(cull).toHaveBeenCalled();
+    expect(manager.getStats().unloadingCount).toBe(0);
+  });
+});
