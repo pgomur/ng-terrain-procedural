@@ -166,8 +166,8 @@ export class TerrainComponent implements AfterViewInit, OnDestroy {
     if (this.activeKeys.has('KeyD')) this.cameraPosition.addScaledVector(this.right, moveDistance);
     if (this.activeKeys.has('KeyA')) this.cameraPosition.addScaledVector(this.right, -moveDistance);
 
-    if (this.activeKeys.has('Space')) this.cameraPosition.y += moveDistance;
-    if (this.activeKeys.has('ControlLeft')) this.cameraPosition.y -= moveDistance;
+    if (this.activeKeys.has('KeyE') || this.activeKeys.has('Space')) this.cameraPosition.y += moveDistance;
+    if (this.activeKeys.has('KeyQ')) this.cameraPosition.y -= moveDistance;
 
     const terrainHeight = this.engine.getTerrainHeightAt(this.cameraPosition.x, this.cameraPosition.z);
 

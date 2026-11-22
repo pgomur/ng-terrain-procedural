@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { TerrainEngine } from './terrain-engine';
+import { TerrainEngine, isWebGPUBackend } from './terrain-engine';
 
 interface RendererSpy {
   setPixelRatio: ReturnType<typeof vi.fn>;
@@ -148,5 +148,14 @@ describe('TerrainEngine initial loading', () => {
     internals.trackInitialLoad(500);
     expect(engine.loadingStage()).toBe('terrain');
     expect(engine.loadingProgress()).toBe(0);
+  });
+});
+
+describe('isWebGPUBackend', () => {
+  it('accepts only the WebGPU backend', () => {
+    expect(isWebGPUBackend({ isWebGPUBackend: true })).toBe(true);
+    expect(isWebGPUBackend({ isWebGLBackend: true })).toBe(false);
+    expect(isWebGPUBackend({})).toBe(false);
+    expect(isWebGPUBackend(null)).toBe(false);
   });
 });

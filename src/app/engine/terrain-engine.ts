@@ -76,6 +76,10 @@ function nextPaint(): Promise<void> {
   });
 }
 
+export function isWebGPUBackend(backend: unknown): boolean {
+  return (backend as { readonly isWebGPUBackend?: boolean } | null)?.isWebGPUBackend === true;
+}
+
 function currentPixelRatio(): number {
   return Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO);
 }
@@ -220,14 +224,6 @@ export class TerrainEngine {
       throw new Error('WebGPU is not supported in this browser');
     }
 
-    const adapter = await gpu.requestAdapter({
-      powerPreference: 'high-performance',
-    });
-
-    if (!adapter) {
-      throw new Error('WebGPU adapter could not be obtained');
-    }
-
     const renderer = new WebGPURenderer({
       canvas,
       antialias: true,
@@ -235,7 +231,17 @@ export class TerrainEngine {
       powerPreference: 'high-performance',
     });
 
-    await renderer.init();
+    try {
+      await renderer.init();
+    } catch (error) {
+      renderer.dispose();
+      throw error;
+    }
+
+    if (!isWebGPUBackend(renderer.backend)) {
+      renderer.dispose();
+      throw new Error('WebGPU could not be initialized and the WebGL 2 fallback cannot run this engine');
+    }
 
     this.observedWidth = canvas.clientWidth;
     this.observedHeight = canvas.clientHeight;
