@@ -7,60 +7,16 @@ import { ChunkManager } from './chunk-manager';
 import { GPUGenerator } from './gpu-generator';
 import { SceneGraph, SHADOW_CASTER_LAYER } from './scene-graph';
 import { SKY_HORIZON_COLOR, createSkyDome, skyColor } from '../shaders/sky.tsl';
+import { FrameStatsCollector } from './frame-stats';
+import { SUN_DIRECTION, SunLight } from './sun-light';
+import { FrameCallback, LoadingStage, TerrainEngineStats } from '../types/engine';
 import { TerrainConfig, DEFAULT_TERRAIN_CONFIG, EngineInitState, CameraState } from '../types/terrain';
 import { Chunk, FrustumPlanes, WorldPosition } from '../types/chunk';
 
-export interface TerrainEngineStats {
-  readonly fps: number;
-  readonly frameMs: number;
-  readonly maxFrameMs: number;
-  readonly cpuFrameMs: number;
-  readonly chunkUpdateMs: number;
-  readonly drawCalls: number;
-  readonly triangles: number;
-  readonly renderWidth: number;
-  readonly renderHeight: number;
-  readonly pixelRatio: number;
-  readonly visibleChunks: number;
-  readonly visibleByLod: readonly number[];
-  readonly readyChunks: number;
-  readonly unloadingChunks: number;
-  readonly generatedPerSecond: number;
-  readonly pendingChunks: number;
-  readonly queueUsage: number;
-  readonly failedChunks: number;
-  readonly atlasBytes: number;
-  readonly stagingBytes: number;
-  readonly geometryBytes: number;
-  readonly terrainBufferBytes: number;
-  readonly cameraX: number;
-  readonly cameraY: number;
-  readonly cameraZ: number;
-  readonly heightAboveGround: number | null;
-  readonly headingDeg: number;
-  readonly pitchDeg: number;
-  readonly cameraSpeed: number;
-  readonly chunkX: number;
-  readonly chunkZ: number;
-  readonly seed: number;
-}
-
-export type FrameCallback = (deltaSeconds: number) => void;
-
-export type LoadingStage = 'device' | 'shaders' | 'terrain' | 'done';
-
 type Mutable<T> = { -readonly [K in keyof T]: T[K] };
 
-interface BufferBackend {
-  has?(resource: object): boolean;
-  get?(resource: object): { readonly buffer?: GPUBuffer } | undefined;
-}
-
 const MAX_FRAME_DELTA_S = 0.1;
-const STATS_INTERVAL_MS = 250;
-const SHADOW_MAP_SIZE = 2048;
 const CAMERA_NEAR = 1;
-const SUN_DIRECTION = new THREE.Vector3(100, 200, 50).normalize();
 const MAX_PIXEL_RATIO = 2;
 const INITIAL_LOAD_MAX_LOD = 1;
 const INITIAL_LOAD_TIMEOUT_MS = 10_000;
@@ -142,25 +98,8 @@ export class TerrainEngine {
 
   private fogNear = 0;
   private fogFar = 0;
-  private sun: THREE.DirectionalLight | null = null;
-  private readonly sunAxisX = new THREE.Vector3();
-  private readonly sunAxisY = new THREE.Vector3();
-  private readonly sunTarget = new THREE.Vector3();
-  private sunDistance = 0;
-  private shadowTexelSize = 1;
-  private shadowFootprintRadius = 0;
-
-  private statsWindowStart = -1;
-  private statsFrames = 0;
-  private statsCpuMs = 0;
-  private statsMaxFrameMs = 0;
-  private statsStreamingMs = 0;
-  private statsDistance = 0;
-  private readonly statsLastPosition = new THREE.Vector3();
-  private lastDrawCalls = 0;
-  private lastTriangles = 0;
-  private readonly statsDirection = new THREE.Vector3();
-  private statsStartGenerated = 0;
+  private sunLight: SunLight | null = null;
+  private readonly frameStats = new FrameStatsCollector();
 
   async init(canvas: HTMLCanvasElement, customConfig?: Partial<TerrainConfig>): Promise<boolean> {
     if (this.initStateSignal() !== 'uninitialized') {
@@ -299,65 +238,17 @@ export class TerrainEngine {
   private initLights(): void {
     if (!this.scene) return;
 
-    const ambient = new THREE.AmbientLight(0x404040, 0.5);
-    this.scene.add(ambient);
-
-    const shadowRadius = this.config.LOD_DISTANCES[0];
-    const heightExtent = Math.abs(this.config.TERRAIN_HEIGHT_SCALE) * 2 + Math.abs(this.config.TERRAIN_OFFSET_Y);
-
-    this.sunDistance = shadowRadius + heightExtent;
-    this.shadowTexelSize = (shadowRadius * 2) / SHADOW_MAP_SIZE;
-
-    this.sunAxisX.crossVectors(new THREE.Vector3(0, 1, 0), SUN_DIRECTION).normalize();
-    this.sunAxisY.crossVectors(SUN_DIRECTION, this.sunAxisX).normalize();
-
-    const sun = new THREE.DirectionalLight(0xffffff, 1);
-    sun.castShadow = true;
-
-    sun.shadow.mapSize.width = SHADOW_MAP_SIZE;
-    sun.shadow.mapSize.height = SHADOW_MAP_SIZE;
-    sun.shadow.camera.near = 0.5;
-    sun.shadow.camera.far = this.sunDistance * 2;
-    sun.shadow.camera.left = -shadowRadius;
-    sun.shadow.camera.right = shadowRadius;
-    sun.shadow.camera.top = shadowRadius;
-    sun.shadow.camera.bottom = -shadowRadius;
-    sun.shadow.normalBias = this.shadowTexelSize;
-    sun.shadow.camera.layers.enable(SHADOW_CASTER_LAYER);
-    sun.shadow.camera.updateProjectionMatrix();
-
-    const elevation = Math.asin(SUN_DIRECTION.y);
-    this.shadowFootprintRadius = shadowRadius / Math.sin(elevation) + heightExtent / Math.tan(elevation);
-
-    this.scene.add(sun);
-    this.scene.add(sun.target);
-    this.sun = sun;
+    this.sunLight = new SunLight(this.config, SHADOW_CASTER_LAYER);
+    this.sunLight.addTo(this.scene);
     this.updateSun();
   }
 
   private updateSun(): void {
-    if (!this.sun || !this.camera) return;
+    if (!this.sunLight || !this.camera) return;
 
     const position = this.camera.position;
-    const texel = this.shadowTexelSize;
-    const u = Math.round(position.dot(this.sunAxisX) / texel) * texel;
-    const v = Math.round(position.dot(this.sunAxisY) / texel) * texel;
-    const w = position.dot(SUN_DIRECTION);
-
-    this.sunTarget
-      .copy(this.sunAxisX)
-      .multiplyScalar(u)
-      .addScaledVector(this.sunAxisY, v)
-      .addScaledVector(SUN_DIRECTION, w);
-
-    this.sun.target.position.copy(this.sunTarget);
-    this.sun.position.copy(this.sunTarget).addScaledVector(SUN_DIRECTION, this.sunDistance);
-
-    this.sceneGraph?.setShadowRegion(
-      position.x,
-      position.z,
-      this.shadowFootprintRadius + Math.abs(position.y) / Math.tan(Math.asin(SUN_DIRECTION.y)),
-    );
+    this.sunLight.follow(position);
+    this.sceneGraph?.setShadowRegion(position.x, position.z, this.sunLight.shadowRegionRadius(position.y));
   }
 
   private prewarmPipelines(): void {
@@ -416,7 +307,7 @@ export class TerrainEngine {
 
     this.isRunning = true;
     this.lastLoopTime = -1;
-    this.statsWindowStart = -1;
+    this.frameStats.restart();
 
     this.animationId = requestAnimationFrame(this.renderLoop);
   }
@@ -432,9 +323,7 @@ export class TerrainEngine {
   private renderLoop = (time: number): void => {
     if (!this.isRunning) return;
 
-    if (this.lastLoopTime >= 0) {
-      this.statsMaxFrameMs = Math.max(this.statsMaxFrameMs, time - this.lastLoopTime);
-    }
+    if (this.lastLoopTime >= 0) this.frameStats.recordInterval(time - this.lastLoopTime);
 
     const delta =
       this.lastLoopTime < 0 ? 0 : Math.min(Math.max((time - this.lastLoopTime) / 1000, 0), MAX_FRAME_DELTA_S);
@@ -450,11 +339,10 @@ export class TerrainEngine {
     if (this.renderer && this.scene && this.camera) {
       this.renderer.info.reset();
       this.renderer.render(this.scene, this.camera);
-      this.lastDrawCalls = this.renderer.info.render.drawCalls;
-      this.lastTriangles = this.renderer.info.render.triangles;
+      this.frameStats.recordRender(this.renderer.info.render.drawCalls, this.renderer.info.render.triangles);
     }
 
-    this.recordFrame(time, performance.now() - cpuStart);
+    this.publishStats(time, performance.now() - cpuStart);
 
     this.animationId = requestAnimationFrame(this.renderLoop);
   };
@@ -505,7 +393,7 @@ export class TerrainEngine {
       this.chunkManager.getVisibilityToggled(),
     );
     this.chunkManager.clearRenderChanges();
-    this.statsStreamingMs += performance.now() - streamingStart;
+    this.frameStats.addStreaming(performance.now() - streamingStart);
   }
 
   private refreshCameraState(camera: THREE.PerspectiveCamera): void {
@@ -554,97 +442,21 @@ export class TerrainEngine {
     }
   }
 
-  private recordFrame(time: number, cpuMs: number): void {
-    if (!this.camera) return;
+  private publishStats(time: number, cpuMs: number): void {
+    if (!this.camera || !this.chunkManager || !this.gpuGenerator || !this.sceneGraph || !this.renderer) return;
 
-    if (this.statsWindowStart < 0) {
-      this.statsWindowStart = time;
-      this.resetStatsWindow(this.camera.position);
-      return;
-    }
-
-    this.statsFrames++;
-    this.statsCpuMs += cpuMs;
-    this.statsDistance += this.camera.position.distanceTo(this.statsLastPosition);
-    this.statsLastPosition.copy(this.camera.position);
-
-    const elapsed = time - this.statsWindowStart;
-    if (elapsed < STATS_INTERVAL_MS) return;
-
-    this.publishStats(elapsed);
-
-    this.statsWindowStart = time;
-    this.resetStatsWindow(this.camera.position);
-  }
-
-  private resetStatsWindow(position: THREE.Vector3): void {
-    this.statsFrames = 0;
-    this.statsCpuMs = 0;
-    this.statsMaxFrameMs = 0;
-    this.statsStreamingMs = 0;
-    this.statsDistance = 0;
-    this.statsLastPosition.copy(position);
-    this.statsStartGenerated = this.gpuGenerator?.generatedCount ?? 0;
-  }
-
-  private publishStats(elapsedMs: number): void {
-    if (!this.camera || !this.chunkManager) return;
-
-    const chunkStats = this.chunkManager.getStats();
-    const position = this.camera.position;
-
-    const direction = this.camera.getWorldDirection(this.statsDirection);
-    const heading = THREE.MathUtils.radToDeg(Math.atan2(direction.x, -direction.z));
-    const ground = this.chunkManager.getTerrainHeightAt(position.x, position.z);
-    const atlasBytes = this.gpuGenerator?.getAtlasBytes() ?? 0;
-    const stagingBytes = this.gpuGenerator?.getStagingBytes() ?? 0;
-    const geometryBytes = this.uploadedBytes(this.sceneGraph?.getGpuAttributes() ?? []);
-
-    this.statsSignal.set({
-      fps: (this.statsFrames * 1000) / elapsedMs,
-      frameMs: this.statsFrames > 0 ? elapsedMs / this.statsFrames : 0,
-      maxFrameMs: this.statsMaxFrameMs,
-      cpuFrameMs: this.statsFrames > 0 ? this.statsCpuMs / this.statsFrames : 0,
-      chunkUpdateMs: this.statsFrames > 0 ? this.statsStreamingMs / this.statsFrames : 0,
-      drawCalls: this.lastDrawCalls,
-      triangles: this.lastTriangles,
-      renderWidth: Math.floor(this.appliedWidth * this.appliedPixelRatio),
-      renderHeight: Math.floor(this.appliedHeight * this.appliedPixelRatio),
+    const snapshot = this.frameStats.endFrame(time, cpuMs, {
+      camera: this.camera,
+      chunkManager: this.chunkManager,
+      gpuGenerator: this.gpuGenerator,
+      sceneGraph: this.sceneGraph,
+      renderer: this.renderer,
+      config: this.config,
+      width: this.appliedWidth,
+      height: this.appliedHeight,
       pixelRatio: this.appliedPixelRatio,
-      visibleChunks: chunkStats.visibleCount,
-      visibleByLod: chunkStats.visibleByLod,
-      readyChunks: chunkStats.readyCount,
-      unloadingChunks: chunkStats.unloadingCount,
-      generatedPerSecond: (((this.gpuGenerator?.generatedCount ?? 0) - this.statsStartGenerated) * 1000) / elapsedMs,
-      pendingChunks: chunkStats.pendingCount,
-      queueUsage: chunkStats.streamingBufferUsage,
-      failedChunks: chunkStats.errorCount,
-      atlasBytes,
-      stagingBytes,
-      geometryBytes,
-      terrainBufferBytes: atlasBytes + stagingBytes + geometryBytes,
-      cameraX: position.x,
-      cameraY: position.y,
-      cameraZ: position.z,
-      heightAboveGround: ground === null ? null : position.y - ground,
-      headingDeg: (heading + 360) % 360,
-      pitchDeg: THREE.MathUtils.radToDeg(Math.asin(THREE.MathUtils.clamp(direction.y, -1, 1))),
-      cameraSpeed: this.statsDistance / (elapsedMs / 1000),
-      chunkX: Math.floor(position.x / this.config.CHUNK_SIZE),
-      chunkZ: Math.floor(position.z / this.config.CHUNK_SIZE),
-      seed: this.config.NOISE_SEED,
     });
-  }
-
-  private uploadedBytes(attributes: readonly object[]): number {
-    const backend = (this.renderer as unknown as { readonly backend?: BufferBackend } | null)?.backend;
-    if (!backend?.has || !backend.get) return 0;
-
-    let bytes = 0;
-    for (const attribute of attributes) {
-      if (backend.has(attribute)) bytes += backend.get(attribute)?.buffer?.size ?? 0;
-    }
-    return bytes;
+    if (snapshot) this.statsSignal.set(snapshot);
   }
 
   setCameraPosition(x: number, y: number, z: number): void {
@@ -685,7 +497,7 @@ export class TerrainEngine {
     this.renderer = null;
 
     this.scene = null;
-    this.sun = null;
+    this.sunLight = null;
     this.camera = null;
     this.canvas = null;
     this.cameraState = null;
