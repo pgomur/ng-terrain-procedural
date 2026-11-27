@@ -1,3 +1,19 @@
+/**
+ * The procedural sky, shared by the sky dome and the fog.
+ *
+ * There is no texture and no skybox: {@link skyColor} computes the colour of the sky for any view direction, and that one function is used twice, so the sky and the fog always agree:
+ *
+ * | Use | Built by | Parts |
+ * | --- | --- | --- |
+ * | Sky dome | {@link createSkyDome} | Gradient, sun glow and haze, sun disk, clouds. |
+ * | Fog | The engine's scene fog | Gradient, sun glow and haze only. |
+ *
+ * Distant terrain fades into exactly the colour of the sky behind it, without the clouds or the sun disk, which would otherwise appear painted on the mountains. The sun direction is {@link engine/sun-light!SUN_DIRECTION | SUN_DIRECTION}, the same as the light's.
+ *
+ * See [Rendering](../../../guides/rendering.md#sky-and-fog).
+ *
+ * @module
+ */
 import {
   cameraProjectionMatrix,
   color,
@@ -20,6 +36,11 @@ import {
 import { BackSide, Mesh, SphereGeometry, type Vector3 } from 'three';
 import { NodeMaterial, type Node } from 'three/webgpu';
 
+/**
+ * Colour of the sky at the horizon, also used as the renderer's clear colour.
+ *
+ * A pale blue-grey. Using it as the clear colour means any pixel left uncovered, such as during start-up, already looks like sky.
+ */
 export const SKY_HORIZON_COLOR = 0xd4e4ef;
 
 const SKY_ZENITH_COLOR = 0x2c69b3;
@@ -37,11 +58,39 @@ const CLOUD_EDGE = 0.14;
 const CLOUD_EDGE_SOFTNESS = 0.12;
 const CLOUD_WIND = vec2(0.006, 0.0025);
 
+/**
+ * Optional parts of {@link skyColor}.
+ *
+ * The sky dome uses `{ sunDisk: true, clouds: true }` and the fog `{ sunDisk: false, clouds: false }`.
+ */
 export interface SkyOptions {
+  /**
+   * Whether to draw the sun disk. The fog leaves it out.
+   */
   readonly sunDisk: boolean;
+  /**
+   * Whether to draw the drifting clouds. The fog leaves them out, so distant terrain fades into a clear horizon.
+   */
   readonly clouds: boolean;
 }
 
+/**
+ * Builds the colour of the sky in a view direction: a gradient from the horizon to the zenith, a glow and haze around the sun and, optionally, the sun disk and clouds.
+ *
+ * The clouds are fractional Brownian motion projected onto a plane above the camera and drifting with time. Their edges are softened over a fixed width, or over the noise's screen-space derivative where that is wider, so they look soft up close and do not flicker near the horizon. They fade out towards the horizon.
+ *
+ * @param direction - Normalised view direction.
+ * @param sun - Unit vector towards the sun.
+ * @param options - Parts to include.
+ * @returns The colour node.
+ *
+ * @example
+ * The fog colour of the engine:
+ * ```ts
+ * const viewDirection = cameraWorldMatrix.mul(vec4(positionView, 0.0)).xyz.normalize();
+ * const fogColor = skyColor(viewDirection, SUN_DIRECTION, { sunDisk: false, clouds: false });
+ * ```
+ */
 export function skyColor(direction: Node<'vec3'>, sun: Vector3, options: SkyOptions): Node<'vec3'> {
   const y = direction.y;
   const up = max(y, 0.0);
@@ -84,6 +133,14 @@ export function skyColor(direction: Node<'vec3'>, sun: Vector3, options: SkyOpti
 
 const SKY_RENDER_ORDER = Number.MAX_SAFE_INTEGER;
 
+/**
+ * Builds the sky dome: a unit sphere seen from inside, centred on the camera and projected onto the far plane. It is drawn after the terrain with depth testing, so only the sky pixels that are actually visible are shaded.
+ *
+ * @param sun - Unit vector towards the sun.
+ * @returns The mesh to add to the scene.
+ *
+ * Since its vertices are projected onto the far plane, the dome's size and position do not matter and it is never clipped, whatever the camera's far distance.
+ */
 export function createSkyDome(sun: Vector3): Mesh {
   const material = new NodeMaterial();
   material.name = 'SkyDome';
