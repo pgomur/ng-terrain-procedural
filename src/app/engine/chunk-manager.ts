@@ -1,3 +1,29 @@
+/**
+ * Streaming: which chunks exist, at which level of detail, and which of them are visible.
+ *
+ * {@link ChunkManager} is the decision-maker of the terrain. Given the camera position and frustum each frame, it keeps the set of chunks around the camera up to date and tells the other parts what changed:
+ *
+ * ```text
+ * camera ──► ChunkManager.update ──► GPUGenerator.generate / release   (heights)
+ *                 │
+ *                 └──► changed cells and visibility ──► SceneGraph.sync (draws)
+ * ```
+ *
+ * In one call to {@link ChunkManager.update} it:
+ *
+ * 1. Refreshes the wanted set when the camera has moved more than 10 % of a chunk: every chunk within `1.2 × max(LOD_DISTANCES)`, each at the level of detail for its distance.
+ * 2. Retires the chunks no longer wanted and requeues failed ones whose retry time has come.
+ * 3. Queues the missing chunks, ordered by distance and by the direction of travel.
+ * 4. Generates up to `GENERATION_BUDGET` of them and submits the GPU work.
+ * 5. Requests the heights of the 3 × 3 chunks around the camera, for collision.
+ * 6. Recomputes visibility against the frustum, if the view or the chunks changed.
+ *
+ * It never waits for the GPU: the exact bounds and the collision heights arrive later through the generator's {@link engine/gpu-generator!HeightListener | HeightListener}.
+ *
+ * See [Streaming and levels of detail](../../../guides/streaming.md).
+ *
+ * @module
+ */
 import {
   Chunk,
   ChunkCoord,
@@ -35,16 +61,66 @@ function retryDelayMs(attempts: number): number {
   return Math.min(RETRY_BASE_MS * 2 ** Math.max(0, attempts - 1), RETRY_MAX_MS);
 }
 
+/**
+ * Counters returned by {@link ChunkManager.getStats}.
+ *
+ * Returned by {@link ChunkManager.getStats}. The engine copies some of these values into {@link types/engine!TerrainEngineStats | TerrainEngineStats}.
+ */
 export interface ChunkManagerStats {
+  /**
+   * Chunks in the `ready` state.
+   */
   readonly readyCount: number;
+  /**
+   * Chunks in the `unloading` state.
+   */
   readonly unloadingCount: number;
+  /**
+   * Chunks in the `error` state.
+   */
   readonly errorCount: number;
+  /**
+   * Chunks inside the last frustum.
+   */
   readonly visibleCount: number;
+  /**
+   * Visible chunks per level of detail, indexed by LOD.
+   */
   readonly visibleByLod: readonly number[];
+  /**
+   * Requests waiting in the generation queue.
+   */
   readonly pendingCount: number;
+  /**
+   * Chunks whose bounds have been refined with the heights read back from the GPU.
+   *
+   * The others are still culled with the analytic height range, which is safe but looser.
+   */
   readonly exactBoundsCount: number;
+  /**
+   * Chunks holding a CPU copy of their heights for collision.
+   *
+   * Heights are requested for the 3 × 3 chunks around the camera and kept until the chunk is released, so the LOD 0 chunks along the camera's recent path keep theirs too. It is between 9 and a few dozen while flying, at most the size of the LOD 0 ring (about 70 chunks with the defaults).
+   */
   readonly heightsCachedCount: number;
+  /**
+   * Fill level of the generation queue, from 0 to 1.
+   *
+   * `pendingCount / GENERATION_QUEUE_CAPACITY`.
+   */
   readonly streamingBufferUsage: number;
+}
+
+/**
+ * Loading progress returned by {@link ChunkManager.getLoadProgress}.
+ *
+ * Returned by {@link ChunkManager.getLoadProgress}. The engine shows `ready / wanted` on the loading screen.
+ */
+export interface LoadProgress {
+  /** Wanted chunks that are ready. */
+  readonly ready: number;
+  /** Chunks wanted at the requested levels of detail. */
+  readonly wanted: number;
 }
 
 interface DesiredChunk {
@@ -55,6 +131,32 @@ interface DesiredChunk {
 
 const MAX_LOD: ChunkLOD = 3;
 
+/**
+ * Decides which chunks exist, at which level of detail, and which of them are visible.
+ *
+ * Every frame it works out the chunks wanted around the camera, queues the missing ones by priority, generates up to `GENERATION_BUDGET` of them on the GPU, retires the ones that are no longer wanted after `UNLOAD_DELAY_MS` and culls the drawable ones against the camera frustum. When a cell changes level of detail, the old version stays on screen until the new one is ready.
+ *
+ * It also copies the heights of the 3 × 3 chunks around the camera back to the CPU, to answer {@link ChunkManager.getTerrainHeightAt}. Each copy is kept until its chunk is released.
+ *
+ * @example
+ * The per-frame sequence the engine runs; `update` also flushes the GPU work:
+ *
+ * ```ts
+ * const generator = new GPUGenerator<Chunk>(renderer, config);
+ * const chunks = new ChunkManager(config, generator);
+ * const scene = new SceneGraph(threeScene, config, generator);
+ *
+ * function frame(camera: THREE.PerspectiveCamera, frustum: FrustumPlanes): void {
+ *   chunks.update(camera.position, frustum);
+ *   scene.sync(chunks.getChunks(), chunks.getVisibleKeys(), chunks.getDirtyCoords(), chunks.getVisibilityToggled());
+ *   chunks.clearRenderChanges();
+ *   renderer.render(threeScene, camera);
+ *
+ *   const ground = chunks.getTerrainHeightAt(camera.position.x, camera.position.z);
+ *   if (ground !== null) camera.position.y = Math.max(camera.position.y, ground + 5);
+ * }
+ * ```
+ */
 export class ChunkManager {
   private readonly config: TerrainConfig;
   private readonly gpuGenerator: GPUGenerator<Chunk>;
@@ -94,6 +196,12 @@ export class ChunkManager {
 
   private readonly seamsEnabled: boolean;
 
+  /**
+   * Creates an empty manager. Nothing is wanted or generated until the first {@link ChunkManager.update}.
+   *
+   * @param config - Terrain configuration.
+   * @param gpuGenerator - Generator that owns the height atlas. The manager registers itself as its listener.
+   */
   constructor(config: TerrainConfig, gpuGenerator: GPUGenerator<Chunk>) {
     this.config = config;
     this.seamsEnabled = config.SEAM_FITTING_ENABLED && supportsSeamStitching(config.CHUNK_RESOLUTIONS);
@@ -105,27 +213,59 @@ export class ChunkManager {
     });
   }
 
+  /**
+   * All chunks currently held, by key.
+   *
+   * Includes chunks in every state, also those being unloaded or waiting for a retry. The map is live and must not be modified.
+   */
   getChunks(): ReadonlyMap<ChunkKey, Chunk> {
     return this.chunks;
   }
 
+  /**
+   * Keys of the drawable chunks inside the last frustum.
+   *
+   * Up to date after {@link ChunkManager.update}. A cell changing level of detail can have both versions in the set; the scene graph draws only one.
+   */
   getVisibleKeys(): ReadonlySet<ChunkKey> {
     return this.visibleKeys;
   }
 
+  /**
+   * Spatial keys (`"x:z"`) of the grid cells whose drawable chunk changed since the last {@link ChunkManager.clearRenderChanges}.
+   *
+   * The scene graph only re-examines these cells, so an unchanged frame costs nothing.
+   */
   getDirtyCoords(): ReadonlySet<string> {
     return this.dirtyCoords;
   }
 
+  /**
+   * Keys of the chunks that entered or left the visible set since the last {@link ChunkManager.clearRenderChanges}.
+   */
   getVisibilityToggled(): ReadonlySet<ChunkKey> {
     return this.visibilityToggled;
   }
 
+  /**
+   * Clears the change sets once the scene graph has consumed them.
+   *
+   * Call it once per frame, after {@link engine/scene-graph!SceneGraph.sync | SceneGraph.sync}.
+   */
   clearRenderChanges(): void {
     this.dirtyCoords.clear();
     this.visibilityToggled.clear();
   }
 
+  /**
+   * Runs one frame of streaming: refreshes the wanted set, retires and retries chunks, queues and generates new ones, requests collision heights and updates visibility.
+   *
+   * It ends by calling {@link engine/gpu-generator!GPUGenerator.flush | GPUGenerator.flush}, so the chunks generated in this call are drawn in the same frame. Most of the work is skipped when nothing changed: the wanted set is only recomputed after a movement of 10 % of a chunk, the retire pass only runs when the chunks changed or a delay is due, and visibility only when the view or the chunks changed.
+   *
+   * @param position - Camera position in world units.
+   * @param frustum - Planes of the camera frustum.
+   * @param viewChanged - Whether the camera moved or its projection changed since the last call. Visibility is only recomputed when the view or the chunk set changed.
+   */
   update(position: WorldPosition, frustum: FrustumPlanes, viewChanged = true): void {
     const frameStart = performance.now();
 
@@ -496,6 +636,11 @@ export class ChunkManager {
     }
   }
 
+  /**
+   * Counts chunks by state and visibility.
+   *
+   * @returns A new statistics object.
+   */
   getStats(): ChunkManagerStats {
     let readyCount = 0;
     let unloadingCount = 0;
@@ -540,7 +685,15 @@ export class ChunkManager {
     };
   }
 
-  getLoadProgress(maxLod: ChunkLOD): { readonly ready: number; readonly wanted: number } {
+  /**
+   * Progress of the chunks wanted at a level of detail up to `maxLod`, used by the loading screen.
+   *
+   * The engine calls it with `maxLod` `1` while the loading screen is shown, so the screen disappears once the terrain near the camera is complete; the distant rings fill in afterwards.
+   *
+   * @param maxLod - Coarsest level of detail to count.
+   * @returns How many of those chunks are ready and how many are wanted.
+   */
+  getLoadProgress(maxLod: ChunkLOD): LoadProgress {
     let ready = 0;
     let wanted = 0;
     for (const entry of this.desiredByCoord.values()) {
@@ -551,6 +704,17 @@ export class ChunkManager {
     return { ready, wanted };
   }
 
+  /**
+   * Height of the rendered terrain at a world position, including seam stitching, so it matches what is drawn.
+   *
+   * Only the chunks around the camera keep their heights on the CPU, and they arrive asynchronously, shortly after the chunk is generated.
+   *
+   * The height is interpolated inside the same triangle the GPU draws at that point, using the finest drawable version of the chunk whose heights are on the CPU, so the camera rests exactly on the visible surface.
+   *
+   * @param x - Position along X, in world units.
+   * @param z - Position along Z, in world units.
+   * @returns The height in world units, or `null` when the heights of that chunk are not available.
+   */
   getTerrainHeightAt(x: number, z: number): number | null {
     const size = this.config.CHUNK_SIZE;
     const chunkX = Math.floor(x / size);
@@ -622,6 +786,9 @@ export class ChunkManager {
     this.nextCullAt = Infinity;
   }
 
+  /**
+   * Releases every chunk and its atlas slot, and stops listening to the generator.
+   */
   dispose(): void {
     this.clearAllChunks();
     this.gpuGenerator.setListener(null);

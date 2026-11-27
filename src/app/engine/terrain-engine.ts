@@ -1,3 +1,22 @@
+/**
+ * The engine that runs the terrain, and the only part of it the rest of the application talks to.
+ *
+ * {@link TerrainEngine} is an Angular service provided per component. It owns the `WebGPURenderer`, the scene, the camera, the sun and the sky, creates the three parts that do the actual work and calls them in a fixed order every frame:
+ *
+ * | Part | Role in the frame |
+ * | --- | --- |
+ * | {@link engine/chunk-manager!ChunkManager | ChunkManager} | Decides which chunks exist and which are visible, and generates the missing ones. |
+ * | {@link engine/gpu-generator!GPUGenerator | GPUGenerator} | Holds the heights on the GPU and runs the compute shaders. |
+ * | {@link engine/scene-graph!SceneGraph | SceneGraph} | Turns the visible chunks into instanced meshes. |
+ *
+ * Everything the application needs is exposed as Angular signals ({@link TerrainEngine.initState}, {@link TerrainEngine.loadingStage}, {@link TerrainEngine.loadingProgress}, {@link TerrainEngine.stats}) and a few camera methods, so a component never touches Three.js objects.
+ *
+ * Its life cycle is `init` → `start` → (`stop` / `start`)* → `dispose`. A lost GPU device stops the loop and sets the state to `lost`.
+ *
+ * See [Architecture](../../../guides/architecture.md) for the frame loop step by step, and [Embedding the terrain](../../../guides/embedding.md) for using it from a component.
+ *
+ * @module
+ */
 import { Injectable, signal, computed } from '@angular/core';
 import * as THREE from 'three';
 import { WebGPURenderer } from 'three/webgpu';
@@ -43,6 +62,46 @@ function currentPixelRatio(): number {
   return Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO);
 }
 
+/**
+ * Runs the terrain: owns the WebGPU renderer, the scene, the camera and the frame loop, and connects the streaming, the GPU generator and the scene graph.
+ *
+ * Provided per {@link terrain/terrain.component!TerrainComponent | TerrainComponent}. Call {@link TerrainEngine.init} with a canvas, then {@link TerrainEngine.start}; each frame then runs the frame callback, streams and renders. Its state, loading progress and diagnostics are exposed as signals.
+ *
+ * Created by Angular's injector, never with `new`: provide it in a component's `providers` and `inject` it.
+ *
+ * @example
+ * A component that runs its own engine and orbits the origin:
+ *
+ * ```ts
+ * @Component({
+ *   selector: 'app-orbit',
+ *   template: '<canvas #canvas></canvas>',
+ *   providers: [TerrainEngine],
+ * })
+ * export class OrbitComponent implements AfterViewInit, OnDestroy {
+ *   private readonly engine = inject(TerrainEngine);
+ *   private readonly canvas = viewChild.required<ElementRef<HTMLCanvasElement>>('canvas');
+ *
+ *   async ngAfterViewInit(): Promise<void> {
+ *     if (!(await this.engine.init(this.canvas().nativeElement, { NOISE_SEED: 7 }))) return;
+ *
+ *     let angle = 0;
+ *     this.engine.setFrameCallback((delta) => {
+ *       angle += delta * 0.1;
+ *       this.engine.setCameraPosition(Math.cos(angle) * 800, 250, Math.sin(angle) * 800);
+ *       this.engine.lookAt(0, 0, 0);
+ *     });
+ *     this.engine.start();
+ *   }
+ *
+ *   ngOnDestroy(): void {
+ *     this.engine.dispose();
+ *   }
+ * }
+ * ```
+ *
+ * @hideconstructor
+ */
 @Injectable()
 export class TerrainEngine {
   private config: TerrainConfig = DEFAULT_TERRAIN_CONFIG;
@@ -61,10 +120,33 @@ export class TerrainEngine {
   private readonly loadingProgressSignal = signal(0);
   private loadingStart = -1;
 
+  /**
+   * Initialisation state.
+   *
+   * Use {@link TerrainEngine.isReady} for the common check. See {@link types/engine!EngineInitState | EngineInitState} for the transitions.
+   */
   readonly initState = this.initStateSignal.asReadonly();
+  /**
+   * Current stage of the loading screen.
+   *
+   * Moves through `device`, `shaders` and `terrain` during start-up, then stays at `done`. See {@link types/engine!LoadingStage | LoadingStage}.
+   */
   readonly loadingStage = this.loadingStageSignal.asReadonly();
+  /**
+   * Fraction of the chunks up to LOD 1 around the camera that are ready, from 0 to 1, during the `terrain` stage.
+   *
+   * It counts the same chunks the loading screen waits for. It is `0` before the `terrain` stage and becomes `1` when loading is `done`, also when the 10-second limit ended it early.
+   */
   readonly loadingProgress = this.loadingProgressSignal.asReadonly();
+  /**
+   * Whether the engine is initialised and usable.
+   */
   readonly isReady = computed(() => this.initStateSignal() === 'ready');
+  /**
+   * Latest diagnostics, published four times per second while running, or `null` before the first window and after disposal.
+   *
+   * Each snapshot is a new object, so `computed` and `effect` that read it re-run four times per second. See [Diagnostics panel](../../../guides/diagnostics.md).
+   */
   readonly stats = this.statsSignal.asReadonly();
 
   private isRunning = false;
@@ -102,6 +184,17 @@ export class TerrainEngine {
   private sunLight: SunLight | null = null;
   private readonly frameStats = new FrameStatsCollector();
 
+  /**
+   * Creates the WebGPU renderer on a canvas, builds the scene and compiles the pipelines.
+   *
+   * Only the first call has an effect; later calls return whether that one succeeded. If the engine is disposed while initialising, the pending call returns `false` and leaves nothing behind.
+   *
+   * Initialisation goes through the loading stages: `device` while the WebGPU device is requested, then, after one paint so the new status is visible, `shaders` while the scene is built and every compute and render pipeline is compiled. If the renderer would fall back to WebGL 2, initialisation fails: the engine needs storage buffers in the vertex stage. Errors are logged and reported through the return value and {@link TerrainEngine.initState}; the method never throws.
+   *
+   * @param canvas - Canvas to render into. Its size is tracked with a `ResizeObserver`.
+   * @param customConfig - Options that replace those of {@link types/terrain!DEFAULT_TERRAIN_CONFIG | DEFAULT_TERRAIN_CONFIG}.
+   * @returns `true` when the engine is ready, `false` when WebGPU is not available or initialisation failed.
+   */
   async init(canvas: HTMLCanvasElement, customConfig?: Partial<TerrainConfig>): Promise<boolean> {
     if (this.initStateSignal() !== 'uninitialized') {
       console.warn('TerrainEngine already initialized');
@@ -318,10 +411,22 @@ export class TerrainEngine {
     this.renderer.setSize(width, height, false);
   }
 
+  /**
+   * Sets the function called at the start of every frame, before streaming and rendering. Used for camera controls.
+   *
+   * The callback receives the time since the previous frame in seconds, `0` on the first frame and at most `0.1`. Only one callback is kept: setting a new one replaces the previous one. Moving the camera inside it is the way to drive the view, because the streaming and culling of the same frame then use the new position. See {@link types/engine!FrameCallback | FrameCallback}.
+   *
+   * @param callback - Callback, or `null` to remove it.
+   */
   setFrameCallback(callback: FrameCallback | null): void {
     this.frameCallback = callback;
   }
 
+  /**
+   * Starts the frame loop. Does nothing unless the engine is ready, or when it is already running.
+   *
+   * The first frame after starting reports a delta of `0`, so time spent stopped does not move the camera, and the statistics window starts again.
+   */
   start(): void {
     if (this.isRunning || this.initStateSignal() !== 'ready') return;
 
@@ -332,6 +437,11 @@ export class TerrainEngine {
     this.animationId = requestAnimationFrame(this.renderLoop);
   }
 
+  /**
+   * Stops the frame loop. Nothing is released; {@link TerrainEngine.start} resumes it.
+   *
+   * The GPU resources, the chunks and the signals keep their values, and the canvas keeps showing the last frame.
+   */
   stop(): void {
     this.isRunning = false;
     if (this.animationId !== null) {
@@ -444,23 +554,63 @@ export class TerrainEngine {
     if (snapshot) this.statsSignal.set(snapshot);
   }
 
+  /**
+   * Moves the camera.
+   *
+   * The camera moves at once; streaming and culling follow it in the next update, which is the same frame when this is called from the frame callback. Nothing prevents placing the camera below the terrain; {@link TerrainEngine.getTerrainHeightAt} gives the ground height to check against. Does nothing before {@link TerrainEngine.init}.
+   *
+   * @param x - Position along X, in world units.
+   * @param y - Height, in world units.
+   * @param z - Position along Z, in world units.
+   */
   setCameraPosition(x: number, y: number, z: number): void {
     this.camera?.position.set(x, y, z);
   }
 
+  /**
+   * Writes the camera's view direction into a vector.
+   *
+   * The vector is a unit vector in world space. Passing a reused vector avoids an allocation per call, which matters when it is called every frame.
+   *
+   * @param target - Vector that receives the direction.
+   * @returns `target`, set to `(0, 0, -1)` before the camera exists.
+   */
   getCameraDirection(target: THREE.Vector3): THREE.Vector3 {
     if (!this.camera) return target.set(0, 0, -1);
     return this.camera.getWorldDirection(target);
   }
 
+  /**
+   * Height of the rendered terrain at a world position. See {@link engine/chunk-manager!ChunkManager.getTerrainHeightAt | ChunkManager.getTerrainHeightAt}.
+   *
+   * Heights are copied to the CPU only for the 3 × 3 chunks around the camera, and kept until those chunks are released. Positions the camera has not been near return `null`.
+   *
+   * @param x - Position along X, in world units.
+   * @param z - Position along Z, in world units.
+   * @returns The height in world units, or `null` when it is not available yet.
+   */
   getTerrainHeightAt(x: number, z: number): number | null {
     return this.chunkManager?.getTerrainHeightAt(x, z) ?? null;
   }
 
+  /**
+   * Turns the camera to look at a point.
+   *
+   * Use it after {@link TerrainEngine.setCameraPosition}, since the direction is computed from the camera's current position. Does nothing before {@link TerrainEngine.init}.
+   *
+   * @param x - Point along X, in world units.
+   * @param y - Point height, in world units.
+   * @param z - Point along Z, in world units.
+   */
   lookAt(x: number, y: number, z: number): void {
     this.camera?.lookAt(x, y, z);
   }
 
+  /**
+   * Stops the loop, cancels a pending initialisation and releases every GPU resource. The engine returns to `uninitialized`.
+   *
+   * Called by {@link terrain/terrain.component!TerrainComponent | TerrainComponent} when it is destroyed. The frame callback and the resize observer are removed too, the statistics go back to `null`, and the canvas can be given to a new engine.
+   */
   dispose(): void {
     this.initGeneration++;
     this.stop();

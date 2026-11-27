@@ -1,3 +1,22 @@
+/**
+ * Height generation on the GPU, and the height atlas where all heights live.
+ *
+ * The heights of every chunk are computed by compute shaders straight into GPU storage buffers and read from there by the vertex shader; they never exist on the CPU, except for the few chunks the camera needs for collision. {@link GPUGenerator} organises that memory and that work:
+ *
+ * | Concept | What it is |
+ * | --- | --- |
+ * | Page ({@link HeightPage}) | One storage buffer holding the heights of many chunks of one resolution. |
+ * | Slot | The place of one chunk in a page, `resolution²` heights. A chunk's {@link types/chunk!ChunkGPUResources | ChunkGPUResources} name its page and slot. |
+ * | Job | A chunk to generate: its world origin and slot, written into the page's job buffer by {@link GPUGenerator.generate}. |
+ * | Dispatch | {@link GPUGenerator.flush} runs the queued jobs of each page in two compute passes, once per frame, before rendering. |
+ * | Read-back | An asynchronous copy back to the CPU: the exact height range of new chunks, and the heights for collision, delivered to a {@link HeightListener}. |
+ *
+ * With the default configuration the atlas starts with four pages, one per level of detail, holding about 6.5 MB of heights; a page that fills up gets a smaller companion page.
+ *
+ * See [GPU height generation](../../../guides/gpu-generation.md).
+ *
+ * @module
+ */
 import { StorageBufferAttribute, WebGPURenderer } from 'three/webgpu';
 
 import {
@@ -7,6 +26,7 @@ import {
   seedToNoiseOffset,
   MAX_NOISE_OCTAVES,
   NoiseUniforms,
+  type HeightKernels,
 } from '../shaders/elevation.tsl';
 import { ChunkCoord, ChunkGPUResources, ChunkLOD } from '../types/chunk';
 import { TerrainConfig } from '../types/terrain';
@@ -35,15 +55,52 @@ interface BackendInternals {
 
 const RELEASED_HEIGHTS = new Float32Array(0);
 
+/**
+ * Receives the results of the asynchronous read-backs of a {@link GPUGenerator}.
+ *
+ * @typeParam TOwner - Object that requested the work, passed back unchanged.
+ *
+ * The {@link engine/chunk-manager!ChunkManager | ChunkManager} is the only listener in the application: it tightens the chunk's culling box on `onBounds`, and stores the heights used for collision on `onHeights`. Both are called from promise callbacks, outside the frame loop, and in no guaranteed order between chunks.
+ */
 export interface HeightListener<TOwner> {
+  /**
+   * Called with the exact height range of a generated chunk. Not called if the chunk's slot was released before the result arrived.
+   *
+   * @param owner - Owner given to {@link GPUGenerator.generate}.
+   * @param minHeight - Lowest height of the chunk, in world units.
+   * @param maxHeight - Highest height of the chunk, in world units.
+   */
   onBounds(owner: TOwner, minHeight: number, maxHeight: number): void;
+  /**
+   * Called with the heights requested through {@link GPUGenerator.requestHeights}.
+   *
+   * @param owner - Owner given to {@link GPUGenerator.requestHeights}.
+   * @param heights - Heights row by row along X, or `null` when the slot was released or the read-back failed.
+   */
   onHeights(owner: TOwner, heights: Float32Array | null): void;
 }
 
+/**
+ * A page of the height atlas: one GPU storage buffer holding the heights of many chunks of the same resolution, one slot per chunk.
+ *
+ * The {@link engine/scene-graph!SceneGraph | SceneGraph} creates one pair of instanced meshes per page and binds its `heights` buffer to the terrain vertex shader. Pages are never removed while the generator lives; their slots are reused.
+ */
 export interface HeightPage {
+  /**
+   * Index of the page, as used in {@link types/chunk!ChunkGPUResources.pageId | ChunkGPUResources.pageId}.
+   */
   readonly id: number;
+  /**
+   * Vertices per side of the chunks stored in the page.
+   */
   readonly resolution: number;
+  /**
+   * Number of chunk slots.
+   */
   readonly capacity: number;
+  /**
+   * Storage buffer with `capacity × resolution²` heights. Slot `s` starts at element `s × resolution²`. Its CPU copy is released after the first upload.
+   */
   readonly heights: StorageBufferAttribute;
 }
 
@@ -58,7 +115,7 @@ interface PageState<TOwner> extends HeightPage {
   heightCopyReleased: boolean;
   readonly bounds: StorageBufferAttribute;
   readonly jobs: StorageBufferAttribute;
-  readonly kernels: ReturnType<typeof createHeightKernels>;
+  readonly kernels: HeightKernels;
   readonly generations: Uint32Array;
   readonly owners: (TOwner | null)[];
   readonly freeSlots: number[];
@@ -68,6 +125,30 @@ interface PageState<TOwner> extends HeightPage {
   heightRequests: PendingSlot<TOwner>[];
 }
 
+/**
+ * Generates chunk heights on the GPU and owns the height atlas.
+ *
+ * Heights are written by a compute kernel into atlas pages, at least one per resolution, sized from the number of chunks expected at each level of detail. Jobs queued with {@link GPUGenerator.generate} are dispatched in batches by {@link GPUGenerator.flush}, before the frame is rendered, so a chunk can be drawn in the frame it is generated. The same kernel computes each chunk's exact height range with atomic operations; that range and any heights needed for collision come back through small asynchronous read-backs reported to the {@link HeightListener}.
+ *
+ * @typeParam TOwner - Object associated with each chunk and passed back to the listener.
+ *
+ * @example
+ * Generating one chunk and reading its results back:
+ *
+ * ```ts
+ * const generator = new GPUGenerator<string>(renderer, config);
+ * generator.setListener({
+ *   onBounds: (owner, min, max) => console.log(owner, 'spans', min, 'to', max),
+ *   onHeights: (owner, heights) => console.log(owner, heights?.length),
+ * });
+ *
+ * const handle = generator.generate({ x: 2, z: -1, lod: 0 }, '2:-1');
+ * generator.requestHeights(handle, '2:-1');
+ * generator.flush();
+ *
+ * generator.release(handle);
+ * ```
+ */
 export class GPUGenerator<TOwner = unknown> {
   private readonly renderer: WebGPURenderer;
   private readonly config: TerrainConfig;
@@ -83,6 +164,12 @@ export class GPUGenerator<TOwner = unknown> {
   private disposed = false;
   private generatedTotal = 0;
 
+  /**
+   * Creates the generator and its noise uniforms. No GPU memory is allocated until the first page is needed, by {@link GPUGenerator.prewarm} or {@link GPUGenerator.generate}.
+   *
+   * @param renderer - An initialised WebGPU renderer.
+   * @param config - Terrain configuration. The noise parameters are applied once, here.
+   */
   constructor(renderer: WebGPURenderer, config: TerrainConfig) {
     this.renderer = renderer;
     this.config = config;
@@ -111,22 +198,50 @@ export class GPUGenerator<TOwner = unknown> {
     n.warpScale.value = c.NOISE_WARP_SCALE;
   }
 
+  /**
+   * Sets the object that receives bounds and heights.
+   *
+   * @param listener - Listener, or `null` to stop receiving results.
+   *
+   * Only one listener is kept; setting another replaces it.
+   */
   setListener(listener: HeightListener<TOwner> | null): void {
     this.listener = listener;
   }
 
+  /**
+   * Total number of chunks generated since creation.
+   *
+   * It only grows. The diagnostics compute *Generated/s* from its change over time.
+   */
   get generatedCount(): number {
     return this.generatedTotal;
   }
 
+  /**
+   * Looks up an atlas page by its index.
+   *
+   * @param pageId - Index of the page.
+   * @returns The page, or `undefined` if it does not exist.
+   */
   getPage(pageId: number): HeightPage | undefined {
     return this.pages[pageId];
   }
 
+  /**
+   * All pages created so far.
+   *
+   * In creation order, so `getPages()[id]` is the page with that index.
+   */
   getPages(): readonly HeightPage[] {
     return this.pages;
   }
 
+  /**
+   * Creates one page per resolution and runs its kernels once, so the compute pipelines are compiled during loading instead of on the first frames.
+   *
+   * The engine calls it during the `shaders` loading stage, before the first frame. The pages it creates are the ones later used for the terrain, so nothing is wasted.
+   */
   prewarm(): void {
     const resolutions = new Set(LODS.map((lod) => this.config.CHUNK_RESOLUTIONS[lod]));
     for (const resolution of resolutions) {
@@ -157,6 +272,16 @@ export class GPUGenerator<TOwner = unknown> {
     return Math.max(MIN_PAGE_SLOTS, Math.ceil(chunks * PAGE_HEADROOM));
   }
 
+  /**
+   * Assigns an atlas slot to a chunk and queues the job that generates its heights. The job is dispatched by the next {@link GPUGenerator.flush}, or immediately if the page's batch is full.
+   *
+   * The slot comes from the first page of the chunk's resolution with room; a new page is created when all are full, so this never fails for lack of space. The handle is valid immediately: the scene graph can draw the chunk in this frame, because its job runs before rendering. The chunk's exact bounds are reported later through {@link HeightListener.onBounds}.
+   *
+   * @param coord - Chunk to generate.
+   * @param owner - Object passed back to the listener with the chunk's bounds.
+   * @returns Where the heights will be stored.
+   * @throws If the generator has been disposed.
+   */
   generate(coord: ChunkCoord, owner: TOwner): ChunkGPUResources {
     if (this.disposed) {
       throw new Error('GPUGenerator has been disposed');
@@ -189,6 +314,11 @@ export class GPUGenerator<TOwner = unknown> {
     return { pageId: page.id, slot, generation, resolution };
   }
 
+  /**
+   * Frees a chunk's slot so it can be reused. A queued job for that slot is cancelled, and results still in flight for it are ignored. Calling it again for the same resources does nothing.
+   *
+   * @param resources - Resources returned by {@link GPUGenerator.generate}.
+   */
   release(resources: ChunkGPUResources): void {
     const page = this.pages.at(resources.pageId);
     if (page?.generations[resources.slot] !== resources.generation) return;
@@ -200,6 +330,13 @@ export class GPUGenerator<TOwner = unknown> {
     page.freeSlots.push(resources.slot);
   }
 
+  /**
+   * Requests a CPU copy of a chunk's heights, delivered through {@link HeightListener.onHeights} after the next {@link GPUGenerator.flush}.
+   *
+   * @param resources - Resources of the chunk.
+   * @param owner - Object passed back to the listener.
+   * @returns `false` if the slot has been released or reused.
+   */
   requestHeights(resources: ChunkGPUResources, owner: TOwner): boolean {
     const page = this.pages.at(resources.pageId);
     if (page?.generations[resources.slot] !== resources.generation) return false;
@@ -209,6 +346,11 @@ export class GPUGenerator<TOwner = unknown> {
     return true;
   }
 
+  /**
+   * Dispatches the queued jobs of every page with pending work and starts the pending read-backs. Called once per frame. Failed bounds read-backs are retried on the next call.
+   *
+   * Per page with jobs: one `reset` dispatch with one thread per job, then one `main` dispatch with one thread per vertex of every job. The compute work is submitted to the same queue as the frame that follows, so no synchronisation is needed. Only one bounds read-back per page is in flight at a time.
+   */
   flush(): void {
     if (this.disposed) return;
 
@@ -220,6 +362,11 @@ export class GPUGenerator<TOwner = unknown> {
     this.dirtyPages.clear();
   }
 
+  /**
+   * Size of the atlas buffers (heights, bounds and job lists), in bytes.
+   *
+   * Shown as *Height atlas* in the diagnostics panel. It only grows when a page is added.
+   */
   getAtlasBytes(): number {
     let bytes = 0;
     for (const page of this.pages) {
@@ -228,6 +375,11 @@ export class GPUGenerator<TOwner = unknown> {
     return bytes;
   }
 
+  /**
+   * Size of the GPU buffers kept in the read-back pool, in bytes.
+   *
+   * Shown as *Read-back* in the diagnostics panel. Buffers are pooled by power-of-two size, from 256 bytes, at most 4 per size and 16 in total.
+   */
   getStagingBytes(): number {
     let bytes = 0;
     for (const [size, pool] of this.stagingPool) bytes += size * pool.length;
@@ -457,6 +609,11 @@ export class GPUGenerator<TOwner = unknown> {
     }
   }
 
+  /**
+   * Stops all work, ignores results still in flight and destroys the pooled read-back buffers.
+   *
+   * After this, {@link GPUGenerator.generate} throws and the other methods do nothing. The atlas buffers themselves are freed with the renderer.
+   */
   dispose(): void {
     this.disposed = true;
     this.listener = null;

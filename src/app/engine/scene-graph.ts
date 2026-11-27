@@ -1,3 +1,19 @@
+/**
+ * From chunks to draw calls.
+ *
+ * The {@link engine/chunk-manager!ChunkManager | ChunkManager} decides what exists and what is visible; {@link SceneGraph} turns that into the Three.js objects the renderer draws, with as few draw calls and as little upload as possible:
+ *
+ * - **One instanced mesh per atlas page.** All chunks of a page share one vertex grid; each instance is a single `vec4` (corner X, corner Z, slot, seam code) and the vertex shader reads the heights of its slot from the page's storage buffer. Thousands of chunks cost a handful of draw calls.
+ * - **One version per grid cell.** When a cell has several levels of detail loaded, only the finest `ready` one is drawn, or the finest `unloading` one while its replacement loads.
+ * - **Seam codes.** Each instance records how much coarser each of its four neighbours is, so the shader can stitch its edges onto theirs.
+ * - **Shadow casters.** A second instanced mesh per page, on {@link SHADOW_CASTER_LAYER}, draws every chunk near the camera into the shadow map, including those outside the view.
+ *
+ * Only the cells reported as changed are re-examined, and only the instance buffers of the pages that changed are rewritten and uploaded.
+ *
+ * See [Rendering](../../../guides/rendering.md).
+ *
+ * @module
+ */
 import * as THREE from 'three';
 import type { Node } from 'three/webgpu';
 import { Chunk, ChunkKey, ChunkLOD } from '../types/chunk';
@@ -14,7 +30,16 @@ import { createTerrainColorNode, createTerrainMaterials, type TerrainMaterials }
 import { createChunkGeometry, type ChunkGeometry } from './chunk-geometry';
 import type { HeightPage } from './gpu-generator';
 
+/**
+ * Provides the atlas pages the terrain meshes read their heights from. Implemented by {@link engine/gpu-generator!GPUGenerator | GPUGenerator}.
+ *
+ * Kept as an interface so the scene graph only depends on what it reads, and can be tested without a GPU.
+ */
 export interface HeightPageSource {
+  /**
+   * @param pageId - Index of the page.
+   * @returns The page, or `undefined` if it does not exist.
+   */
   getPage(pageId: number): HeightPage | undefined;
 }
 
@@ -50,6 +75,11 @@ interface ShadowRegion {
   readonly radius: number;
 }
 
+/**
+ * Render layer of the shadow-only terrain meshes. The sun's shadow camera renders this layer; the main camera does not.
+ *
+ * The main terrain meshes receive shadows but do not cast them; these meshes cast them but are never seen. That way terrain outside the view, such as a hill behind the camera, still throws its shadow into it.
+ */
 export const SHADOW_CASTER_LAYER = 1;
 
 const LODS: readonly ChunkLOD[] = [0, 1, 2, 3];
@@ -60,6 +90,21 @@ const NEIGHBOR_STEPS: readonly (readonly [number, number])[] = [
   [0, 1],
 ];
 
+/**
+ * Turns the chunk set into instanced Three.js meshes.
+ *
+ * Each atlas page gets one `InstancedMesh` that draws every visible chunk stored in it. The vertex shader displaces a shared grid with the heights of the chunk's slot and stitches its edges to coarser neighbours. For each grid cell, only one version is drawn: the finest `ready` chunk, or the finest `unloading` one while the replacement loads. A second instanced mesh per page, on {@link SHADOW_CASTER_LAYER}, casts shadows for every chunk within the shadow region, whether or not the camera sees it.
+ *
+ * Instance buffers are rebuilt only for pages whose content, visibility or seams changed.
+ *
+ * @example
+ * ```ts
+ * const sceneGraph = new SceneGraph(scene, config, generator);
+ * sceneGraph.setShadowRegion(camera.position.x, camera.position.z, 800);
+ * sceneGraph.sync(chunks.getChunks(), chunks.getVisibleKeys(), chunks.getDirtyCoords(), chunks.getVisibilityToggled());
+ * chunks.clearRenderChanges();
+ * ```
+ */
 export class SceneGraph {
   private readonly scene: THREE.Scene;
   private readonly config: TerrainConfig;
@@ -75,6 +120,13 @@ export class SceneGraph {
   private readonly skirtDepth: number;
   private shadowRegion: ShadowRegion | null = null;
 
+  /**
+   * Creates an empty scene graph. Meshes, grids and materials are created on demand, the first time a page is used.
+   *
+   * @param scene - Scene the meshes are added to.
+   * @param config - Terrain configuration.
+   * @param heightSource - Source of the atlas pages.
+   */
   constructor(scene: THREE.Scene, config: TerrainConfig, heightSource: HeightPageSource) {
     this.scene = scene;
     this.config = config;
@@ -84,6 +136,16 @@ export class SceneGraph {
     this.skirtDepth = skirtDepthFor(config.TERRAIN_HEIGHT_SCALE);
   }
 
+  /**
+   * Applies the changes reported by the {@link engine/chunk-manager!ChunkManager | ChunkManager} since the last call.
+   *
+   * Call it once per frame, after {@link engine/chunk-manager!ChunkManager.update | ChunkManager.update} and before rendering, then call {@link engine/chunk-manager!ChunkManager.clearRenderChanges | ChunkManager.clearRenderChanges}. The cost is proportional to the changes, not to the number of chunks: a frame where nothing changed does no work.
+   *
+   * @param chunks - All chunks, by key.
+   * @param visibleKeys - Keys of the chunks inside the frustum.
+   * @param dirtyCoords - Spatial keys of the cells whose drawable chunk changed.
+   * @param visibilityToggled - Keys of the chunks whose visibility changed.
+   */
   sync(
     chunks: ReadonlyMap<ChunkKey, Chunk>,
     visibleKeys: ReadonlySet<ChunkKey>,
@@ -122,6 +184,15 @@ export class SceneGraph {
     }
   }
 
+  /**
+   * Sets the circle on the ground whose chunks cast shadows. The centre and radius are quantised to half a chunk so the shadow casters are not rebuilt every frame.
+   *
+   * @param x - Centre along X, in world units.
+   * @param z - Centre along Z, in world units.
+   * @param radius - Radius in world units.
+   *
+   * The engine calls it every frame with the radius from {@link engine/sun-light!SunLight.shadowRegionRadius | SunLight.shadowRegionRadius}. Because of the quantisation, the shadow instances are only rebuilt every 64 units of movement with the default chunk size.
+   */
   setShadowRegion(x: number, z: number, radius: number): void {
     const step = this.config.CHUNK_SIZE * 0.5;
     const qx = Math.round(x / step) * step;
@@ -134,12 +205,20 @@ export class SceneGraph {
     for (const batch of this.batches.values()) batch.shadowDirty = true;
   }
 
+  /**
+   * Number of chunks currently drawn as shadow casters.
+   *
+   * Used by the tests to check the shadow region.
+   */
   get shadowInstanceCount(): number {
     let count = 0;
     for (const batch of this.batches.values()) count += batch.shadowMesh.count;
     return count;
   }
 
+  /**
+   * Every buffer attribute of the terrain meshes that can be uploaded to the GPU: shared grids, per-instance data and instance matrices. Used to report geometry memory.
+   */
   getGpuAttributes(): THREE.BufferAttribute[] {
     const attributes: THREE.BufferAttribute[] = [];
     for (const base of this.baseGeometries.values()) {
@@ -151,6 +230,13 @@ export class SceneGraph {
     return attributes;
   }
 
+  /**
+   * Prepares one instance per page so the render pipelines are compiled during loading. Call {@link SceneGraph.endPrewarm} after rendering a frame.
+   *
+   * @param pages - Pages to prepare.
+   *
+   * The engine calls it during the `shaders` loading stage, after {@link engine/gpu-generator!GPUGenerator.prewarm | GPUGenerator.prewarm} has created the pages.
+   */
   prewarm(pages: readonly HeightPage[]): void {
     for (const page of pages) {
       const batch = this.batchFor(page.id);
@@ -176,6 +262,9 @@ export class SceneGraph {
     }
   }
 
+  /**
+   * Restores the real instance lists after {@link SceneGraph.prewarm}.
+   */
   endPrewarm(): void {
     for (const batch of this.batches.values()) {
       batch.dirty = true;
@@ -426,6 +515,9 @@ export class SceneGraph {
     return materials;
   }
 
+  /**
+   * Removes the meshes from the scene and disposes their geometries and materials.
+   */
   dispose(): void {
     for (const batch of this.batches.values()) {
       this.scene.remove(batch.mesh);
