@@ -11,6 +11,7 @@ import {
   uniform,
   storage,
   select,
+  computeKernel,
   instanceIndex,
   attribute,
   vec4,
@@ -21,7 +22,7 @@ import {
   atomicStore,
   mx_noise_float,
 } from 'three/tsl';
-import type { StorageBufferAttribute } from 'three/webgpu';
+import type { Node, StorageBufferAttribute } from 'three/webgpu';
 
 const NOISE_FREQUENCY = 0.001;
 
@@ -31,6 +32,7 @@ const BOUNDS_EMPTY_MIN_KEY = 0xffffffff;
 const BOUNDS_EMPTY_MAX_KEY = 0;
 
 const SEED_OFFSET_RANGE = 256;
+const COMPUTE_WORKGROUP_SIZE = 64;
 
 export function seedToNoiseOffset(seed: number): { x: number; z: number } {
   const hash = (v: number): number => {
@@ -60,39 +62,32 @@ export function encodeOrderedFloat(value: number): number {
   return (bits & 0x80000000 ? ~bits : bits ^ 0x80000000) >>> 0;
 }
 
-const fbm = Fn(
-  ([p, octaves, persistence, lacunarity]: [
-    ReturnType<typeof vec2>,
-    ReturnType<typeof float>,
-    ReturnType<typeof float>,
-    ReturnType<typeof float>,
-  ]) => {
-    const total = float(0.0).toVar();
-    const amplitude = float(1.0).toVar();
-    const frequency = float(1.0).toVar();
-    const norm = float(0.0).toVar();
+const fbm = Fn(([p, octaves, persistence, lacunarity]: [Node<'vec2'>, Node<'float'>, Node<'float'>, Node<'float'>]) => {
+  const total = float(0.0).toVar();
+  const amplitude = float(1.0).toVar();
+  const frequency = float(1.0).toVar();
+  const norm = float(0.0).toVar();
 
-    Loop({ start: int(0), end: int(octaves), type: 'int', condition: '<' }, ({ i }) => {
-      const shift = vec2(17.13, 31.71).mul(float(i));
-      total.addAssign(mx_noise_float(p.mul(frequency).add(shift)).mul(amplitude));
-      norm.addAssign(amplitude);
-      amplitude.mulAssign(persistence);
-      frequency.mulAssign(lacunarity);
-    });
+  Loop({ start: int(0), end: int(octaves), type: 'int', condition: '<' }, ({ i }) => {
+    const shift = vec2(17.13, 31.71).mul(float(i));
+    total.addAssign(mx_noise_float(p.mul(frequency).add(shift)).mul(amplitude));
+    norm.addAssign(amplitude);
+    amplitude.mulAssign(persistence);
+    frequency.mulAssign(lacunarity);
+  });
 
-    return total.div(norm.max(1e-6));
-  },
-);
+  return total.div(norm.max(1e-6));
+});
 
 const domainWarp = Fn(
   ([p, warpStrength, warpOctaves, warpScale, baseOctaves, basePersistence, baseLacunarity]: [
-    ReturnType<typeof vec2>,
-    ReturnType<typeof float>,
-    ReturnType<typeof float>,
-    ReturnType<typeof float>,
-    ReturnType<typeof float>,
-    ReturnType<typeof float>,
-    ReturnType<typeof float>,
+    Node<'vec2'>,
+    Node<'float'>,
+    Node<'float'>,
+    Node<'float'>,
+    Node<'float'>,
+    Node<'float'>,
+    Node<'float'>,
   ]) => {
     const q = p.mul(warpScale);
     const warpX = fbm(q.add(vec2(1.7, 9.2)), warpOctaves, float(0.5), float(2.0));
@@ -146,72 +141,78 @@ export function createHeightKernels(options: HeightKernelOptions) {
   const perChunk = int(verticesPerChunk);
   const invSpan = float(1 / (resolution - 1));
 
-  const main = Fn(() => {
-    const globalIdx = int(instanceIndex);
+  const main = computeKernel(
+    Fn(() => {
+      const globalIdx = int(instanceIndex);
 
-    If(globalIdx.greaterThanEqual(int(jobCount).mul(perChunk)), () => {
-      Return();
-    });
+      If(globalIdx.greaterThanEqual(int(jobCount).mul(perChunk)), () => {
+        Return();
+      });
 
-    const jobIndex = globalIdx.div(perChunk);
-    const local = globalIdx.mod(perChunk);
-    const job = jobs.element(jobIndex);
-    const slot = int(job.z);
+      const jobIndex = globalIdx.div(perChunk);
+      const local = globalIdx.mod(perChunk);
+      const job = jobs.element(jobIndex);
+      const slot = int(job.z);
 
-    const x = local.mod(res);
-    const z = local.div(res);
+      const x = local.mod(res);
+      const z = local.div(res);
 
-    const u = float(x).mul(invSpan);
-    const v = float(z).mul(invSpan);
+      const u = float(x).mul(invSpan);
+      const v = float(z).mul(invSpan);
 
-    const worldX = job.x.add(u.mul(noise.chunkSize));
-    const worldZ = job.y.add(v.mul(noise.chunkSize));
+      const worldX = job.x.add(u.mul(noise.chunkSize));
+      const worldZ = job.y.add(v.mul(noise.chunkSize));
 
-    const noiseP = vec2(worldX, worldZ).mul(NOISE_FREQUENCY).add(vec2(noise.seedOffsetX, noise.seedOffsetZ));
+      const noiseP = vec2(worldX, worldZ).mul(NOISE_FREQUENCY).add(vec2(noise.seedOffsetX, noise.seedOffsetZ));
 
-    const elevation = float(0.0).toVar();
+      const elevation = float(0.0).toVar();
 
-    If(noise.warpEnabled.greaterThan(float(0.5)), () => {
-      elevation.assign(
-        domainWarp(
-          noiseP,
-          noise.warpStrength,
-          noise.warpOctaves,
-          noise.warpScale,
-          noise.octaves,
-          noise.persistence,
-          noise.lacunarity,
-        ),
-      );
-    }).Else(() => {
-      elevation.assign(fbm(noiseP, noise.octaves, noise.persistence, noise.lacunarity));
-    });
+      If(noise.warpEnabled.greaterThan(float(0.5)), () => {
+        elevation.assign(
+          domainWarp(
+            noiseP,
+            noise.warpStrength,
+            noise.warpOctaves,
+            noise.warpScale,
+            noise.octaves,
+            noise.persistence,
+            noise.lacunarity,
+          ),
+        );
+      }).Else(() => {
+        elevation.assign(fbm(noiseP, noise.octaves, noise.persistence, noise.lacunarity));
+      });
 
-    elevation.assign(elevation.mul(0.5).add(0.5));
-    elevation.mulAssign(noise.heightScale);
-    elevation.addAssign(noise.offsetY);
+      elevation.assign(elevation.mul(0.5).add(0.5));
+      elevation.mulAssign(noise.heightScale);
+      elevation.addAssign(noise.offsetY);
 
-    heights.element(slot.mul(perChunk).add(local)).assign(elevation);
+      heights.element(slot.mul(perChunk).add(local)).assign(elevation);
 
-    const bits = uint(floatBitsToUint(elevation));
-    const key = bits.bitXor(select(bits.shiftRight(uint(31)).equal(uint(1)), uint(0xffffffff), uint(0x80000000)));
+      const bits = uint(floatBitsToUint(elevation) as unknown as Node<'uint'>);
+      const key = bits.bitXor(select(bits.shiftRight(uint(31)).equal(uint(1)), uint(0xffffffff), uint(0x80000000)));
 
-    atomicMin(bounds.element(slot.mul(2)), key);
-    atomicMax(bounds.element(slot.mul(2).add(1)), key);
-  })().compute(maxJobs * verticesPerChunk);
+      atomicMin(bounds.element(slot.mul(2)), key);
+      atomicMax(bounds.element(slot.mul(2).add(1)), key);
+    })(),
+    [COMPUTE_WORKGROUP_SIZE],
+  );
 
-  const reset = Fn(() => {
-    const jobIndex = int(instanceIndex);
+  const reset = computeKernel(
+    Fn(() => {
+      const jobIndex = int(instanceIndex);
 
-    If(jobIndex.greaterThanEqual(int(jobCount)), () => {
-      Return();
-    });
+      If(jobIndex.greaterThanEqual(int(jobCount)), () => {
+        Return();
+      });
 
-    const slot = int(resetJobs.element(jobIndex).z);
+      const slot = int(resetJobs.element(jobIndex).z);
 
-    atomicStore(resetBounds.element(slot.mul(2)), uint(BOUNDS_EMPTY_MIN_KEY));
-    atomicStore(resetBounds.element(slot.mul(2).add(1)), uint(BOUNDS_EMPTY_MAX_KEY));
-  })().compute(maxJobs);
+      atomicStore(resetBounds.element(slot.mul(2)), uint(BOUNDS_EMPTY_MIN_KEY));
+      atomicStore(resetBounds.element(slot.mul(2).add(1)), uint(BOUNDS_EMPTY_MAX_KEY));
+    })(),
+    [COMPUTE_WORKGROUP_SIZE],
+  );
 
   return { main, reset, jobCount, verticesPerChunk };
 }
@@ -235,11 +236,7 @@ export function createTerrainPositionNode(
 
     const height = float(heights.element(base.add(index))).toVar();
 
-    const stitch = (
-      diff: ReturnType<typeof int>,
-      t: ReturnType<typeof int>,
-      toIndex: (i: ReturnType<typeof int>) => ReturnType<typeof int>,
-    ) => {
+    const stitch = (diff: Node<'int'>, t: Node<'int'>, toIndex: (i: Node<'int'>) => Node<'int'>) => {
       If(diff.greaterThan(int(0)), () => {
         const step = int(1).shiftLeft(diff);
         const a = t.div(step).mul(step);

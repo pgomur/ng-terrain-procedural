@@ -146,7 +146,7 @@ export class SceneGraph {
       attributes.push(base.position, base.heightIndex, base.index);
     }
     for (const batch of this.batches.values()) {
-      attributes.push(batch.instanceData, batch.shadowData);
+      attributes.push(batch.instanceData, batch.shadowData, batch.mesh.instanceMatrix, batch.shadowMesh.instanceMatrix);
     }
     return attributes;
   }

@@ -27,27 +27,27 @@
   "private": true,
   "packageManager": "npm@11.10.0",
   "dependencies": {
-    "@angular/common": "^21.1.0",
-    "@angular/compiler": "^21.1.0",
-    "@angular/core": "^21.1.0",
-    "@angular/platform-browser": "^21.1.0",
+    "@angular/common": "^22.3.0",
+    "@angular/compiler": "^22.3.0",
+    "@angular/core": "^22.3.0",
+    "@angular/platform-browser": "^22.3.0",
     "rxjs": "~7.8.0",
-    "three": "^0.183.2",
+    "three": "^0.187.0",
     "tslib": "^2.3.0"
   },
   "devDependencies": {
-    "@angular/build": "^21.1.0",
-    "@angular/cli": "^21.1.0",
-    "@angular/compiler-cli": "^21.1.0",
+    "@angular/build": "^22.3.0",
+    "@angular/cli": "^22.3.0",
+    "@angular/compiler-cli": "^22.3.0",
     "@eslint/js": "^10.0.1",
-    "@types/three": "^0.183.1",
-    "@webgpu/types": "^0.1.69",
-    "angular-eslint": "^21.4.0",
-    "eslint": "^10.15.0",
-    "jsdom": "^27.1.0",
+    "@types/three": "^0.187.0",
+    "@webgpu/types": "^0.1.74",
+    "angular-eslint": "^22.8.0",
+    "eslint": "^10.16.0",
+    "jsdom": "^29.1.1",
     "prettier": "^3.10.1",
-    "typescript": "~5.9.2",
-    "typescript-eslint": "^8.73.0",
-    "vitest": "^4.0.8"
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.74.0",
+    "vitest": "^5.1.2"
   }
 }

@@ -35,6 +35,10 @@ function isWebGPUBackend(backend: unknown): boolean {
   return (backend as { readonly isWebGPUBackend?: boolean } | null)?.isWebGPUBackend === true;
 }
 
+function releaseRenderer(renderer: WebGPURenderer): void {
+  renderer.dispose().catch(() => undefined);
+}
+
 function currentPixelRatio(): number {
   return Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO);
 }
@@ -119,7 +123,7 @@ export class TerrainEngine {
     try {
       const renderer = await this.createRenderer(canvas);
       if (generation !== this.initGeneration) {
-        renderer.dispose();
+        releaseRenderer(renderer);
         return false;
       }
       this.renderer = renderer;
@@ -187,12 +191,12 @@ export class TerrainEngine {
     try {
       await renderer.init();
     } catch (error) {
-      renderer.dispose();
+      releaseRenderer(renderer);
       throw error;
     }
 
     if (!isWebGPUBackend(renderer.backend)) {
-      renderer.dispose();
+      releaseRenderer(renderer);
       throw new Error('WebGPU could not be initialized and the WebGL 2 fallback cannot run this engine');
     }
 
@@ -205,7 +209,7 @@ export class TerrainEngine {
     renderer.setSize(this.appliedWidth, this.appliedHeight, false);
     renderer.setClearColor(SKY_HORIZON_COLOR, 1);
     renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.shadowMap.type = THREE.PCFShadowMap;
 
     return renderer;
   }
@@ -474,7 +478,7 @@ export class TerrainEngine {
     this.sceneGraph?.dispose();
     this.sceneGraph = null;
 
-    this.renderer?.dispose();
+    if (this.renderer) releaseRenderer(this.renderer);
     this.renderer = null;
 
     this.scene = null;
