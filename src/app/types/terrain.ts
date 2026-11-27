@@ -1,4 +1,4 @@
-import type { ChunkLOD, WorldPosition } from './chunk';
+import type { ChunkLOD } from './chunk';
 
 /**
  * Global terrain engine configuration
@@ -53,33 +53,6 @@ export interface TerrainConfig {
    * Default: 256.
    */
   readonly GENERATION_QUEUE_CAPACITY: number;
-}
-
-/**
- * Engine initialization state
- */
-export type EngineInitState =
-  | 'uninitialized' // Nothing created
-  | 'initializing' // Requesting WebGPU device
-  | 'ready' // Ready to generate terrain
-  | 'failed'; // Unrecoverable error
-
-/**
- * Camera status in world coordinates
- * Updated every frame from Three.js
- */
-export interface CameraState {
-  readonly position: WorldPosition;
-  readonly forward: WorldPosition;
-  readonly up: WorldPosition;
-  readonly right: WorldPosition;
-  readonly fov: number;
-  readonly aspect: number;
-  readonly near: number;
-  readonly far: number;
-  readonly viewMatrix: Float32Array;
-  readonly projectionMatrix: Float32Array;
-  readonly viewProjectionMatrix: Float32Array;
 }
 
 /**

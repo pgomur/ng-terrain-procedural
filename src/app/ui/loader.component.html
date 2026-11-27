@@ -1,0 +1,21 @@
+@let error = errorTitle();
+<div class="loader" [class.is-done]="done()" [attr.role]="error === null ? 'status' : 'alert'">
+  <div class="loader-content">
+    <h1 class="loader-title">Procedural Terrain</h1>
+    @if (error === null) {
+      @let value = progress();
+      <div class="loader-bar" [class.is-indeterminate]="value === null">
+        <div class="loader-bar-fill" [style.transform]="'scaleX(' + (value ?? 0) + ')'"></div>
+      </div>
+      <p class="loader-status">
+        {{ status() }}
+        @if (value !== null) {
+          <span class="loader-percent">{{ value * 100 | number: '1.0-0' }}%</span>
+        }
+      </p>
+    } @else {
+      <p class="loader-error-title">{{ error }}</p>
+      <p class="loader-error">{{ errorMessage() }}</p>
+    }
+  </div>
+</div>
