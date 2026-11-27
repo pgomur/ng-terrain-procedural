@@ -1,30 +1,22 @@
 import { ChangeDetectionStrategy, Component } from '@angular/core';
 import { TerrainComponent } from './terrain/terrain.component';
+import { LoaderComponent } from './ui/loader.component';
 
 @Component({
   selector: 'app-root',
-  imports: [TerrainComponent],
+  imports: [TerrainComponent, LoaderComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <main class="app-container">
       @defer (on immediate) {
         <app-terrain [showDiagnostics]="true" />
       } @placeholder {
-        <div class="loader" role="status">
-          <div class="loader-content">
-            <h1 class="loader-title">Procedural Terrain</h1>
-            <div class="loader-bar is-indeterminate"><div class="loader-bar-fill"></div></div>
-            <p class="loader-status">Loading engine</p>
-          </div>
-        </div>
+        <app-loader status="Loading engine" />
       } @error {
-        <div class="loader" role="alert">
-          <div class="loader-content">
-            <h1 class="loader-title">Procedural Terrain</h1>
-            <p class="loader-error-title">The terrain engine could not be loaded</p>
-            <p class="loader-error">Check your connection and reload the page.</p>
-          </div>
-        </div>
+        <app-loader
+          errorTitle="The terrain engine could not be loaded"
+          errorMessage="Check your connection and reload the page."
+        />
       }
     </main>
   `,
