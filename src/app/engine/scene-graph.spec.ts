@@ -92,7 +92,7 @@ function setup() {
 }
 
 function frame(manager: ChunkManager, graph: SceneGraph, camera: THREE.PerspectiveCamera, viewChanged = true) {
-  manager.update({ position: camera.position } as never, frustumFor(camera), viewChanged);
+  manager.update(camera.position, frustumFor(camera), viewChanged);
   graph.sync(manager.getChunks(), manager.getVisibleKeys(), manager.getDirtyCoords(), manager.getVisibilityToggled());
   manager.clearRenderChanges();
 }

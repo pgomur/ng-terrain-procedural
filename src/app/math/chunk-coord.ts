@@ -1,15 +1,9 @@
 import type { Chunk, ChunkCoord, ChunkKey, ChunkLOD, WorldPosition, ChunkBounds, FrustumPlanes } from '../types/chunk';
 
-/**
- * Generates the unique string key for a chunk
- */
 export function getChunkKey(coord: ChunkCoord): ChunkKey {
   return `${coord.x}:${coord.z}:${coord.lod}`;
 }
 
-/**
- * Calculate the origin (bottom left corner) of a chunk in world coordinates
- */
 function getChunkOrigin(coord: ChunkCoord, chunkSize: number): WorldPosition {
   return {
     x: coord.x * chunkSize,
@@ -18,9 +12,6 @@ function getChunkOrigin(coord: ChunkCoord, chunkSize: number): WorldPosition {
   };
 }
 
-/**
- * Gets the center of a chunk in world coordinates
- */
 export function getChunkCenter(coord: ChunkCoord, chunkSize: number): WorldPosition {
   const origin = getChunkOrigin(coord, chunkSize);
   return {
@@ -30,9 +21,6 @@ export function getChunkCenter(coord: ChunkCoord, chunkSize: number): WorldPosit
   };
 }
 
-/**
- * Determine the appropriate LOD for a chunk based on distance to camera
- */
 export function selectLODForDistance(distance: number, lodDistances: readonly [number, number, number]): ChunkLOD {
   if (distance <= lodDistances[0]) return 0;
   if (distance <= lodDistances[1]) return 1;
@@ -40,19 +28,12 @@ export function selectLODForDistance(distance: number, lodDistances: readonly [n
   return 3;
 }
 
-/**
- * Calculate 2D Euclidean (XZ) distance from the camera to the center of the chunk
- */
 export function distanceToChunk(cameraPos: WorldPosition, chunkCenter: WorldPosition): number {
   const dx = cameraPos.x - chunkCenter.x;
   const dz = cameraPos.z - chunkCenter.z;
   return Math.sqrt(dx * dx + dz * dz);
 }
 
-/**
- * More stringent test: AABB (Axis-Aligned Bounding Box) vs. Frustum
- * More accurate than a sphere but more expensive
- */
 export function intersectsFrustumAABB(bounds: ChunkBounds, planes: FrustumPlanes, epsilon = 8.0): boolean {
   for (let i = 0; i < 6; i++) {
     const normal = planes.normals[i];
@@ -103,19 +84,9 @@ export function boundsFromHeights(
   const minZ = coord.z * chunkSize;
   const maxX = minX + chunkSize;
   const maxZ = minZ + chunkSize;
-  const center = {
-    x: (minX + maxX) / 2,
-    y: (minHeight + maxHeight) / 2,
-    z: (minZ + maxZ) / 2,
-  };
-  const hx = chunkSize / 2;
-  const hy = (maxHeight - minHeight) / 2;
-
   return {
     min: { x: minX, y: minHeight, z: minZ },
     max: { x: maxX, y: maxHeight, z: maxZ },
-    center,
-    radius: Math.sqrt(hx * hx * 2 + hy * hy),
   };
 }
 

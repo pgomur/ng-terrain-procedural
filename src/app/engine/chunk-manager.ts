@@ -9,7 +9,6 @@ import {
   WorldPosition,
 } from '../types/chunk';
 import { TerrainConfig } from '../types/terrain';
-import { CameraState } from '../types/engine';
 import { CameraVelocityTracker } from './camera-velocity';
 import { GPUGenerator } from './gpu-generator';
 import { StreamingPriorityQueue } from './streaming-queue';
@@ -78,7 +77,7 @@ export class ChunkManager {
   private lastCameraPos = { x: Infinity, z: Infinity };
   private lastVelocityX = 0;
   private lastVelocityZ = 0;
-  private readonly VELOCITY_CHANGE_THRESHOLD = 5; // world-units/s
+  private readonly VELOCITY_CHANGE_THRESHOLD = 5;
 
   private desired: DesiredChunk[] = [];
   private readonly desiredKeys = new Set<ChunkKey>();
@@ -127,9 +126,8 @@ export class ChunkManager {
     this.visibilityToggled.clear();
   }
 
-  update(camera: CameraState, frustum: FrustumPlanes, viewChanged = true): void {
+  update(position: WorldPosition, frustum: FrustumPlanes, viewChanged = true): void {
     const frameStart = performance.now();
-    const position = camera.position;
 
     this.cameraX = position.x;
     this.cameraZ = position.z;
@@ -212,7 +210,6 @@ export class ChunkManager {
     const maxDist = Math.max(...this.config.LOD_DISTANCES) * 1.2;
     const radius = Math.ceil(maxDist / this.config.CHUNK_SIZE);
 
-    // Spiral outward from camera to naturally order by proximity
     let x = 0,
       z = 0,
       dx = 0,
@@ -307,7 +304,6 @@ export class ChunkManager {
 
     this.nextCullAt = nextCullAt;
 
-    // Evict excess if over MAX_CHUNKS
     if (this.chunks.size - this.releaseKeys.size > this.config.MAX_CHUNKS) {
       const candidates: Chunk[] = [];
       for (const [key, chunk] of this.chunks) {
@@ -386,7 +382,6 @@ export class ChunkManager {
       const req = this.queue.dequeue();
       if (!req) break;
 
-      // Skip if already active or generating
       if (this.chunks.has(req.key)) continue;
 
       const chunk = this.buildChunk(req.coord, now);

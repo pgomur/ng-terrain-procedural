@@ -64,7 +64,6 @@ describe('chunk-coord', () => {
     const b = boundsFromHeights({ x: 1, z: -1, lod: 0 }, 128, 10, 30);
     expect(b.min).toEqual({ x: 128, y: 10, z: -128 });
     expect(b.max).toEqual({ x: 256, y: 30, z: 0 });
-    expect(b.radius).toBeCloseTo(Math.sqrt(64 * 64 * 2 + 10 * 10), 10);
 
     const inside = { normals: Array(6).fill({ x: 0, y: 0, z: 0 }), constants: Array(6).fill(1) };
     expect(intersectsFrustumAABB(b, inside)).toBe(true);

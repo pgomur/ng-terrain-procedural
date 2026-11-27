@@ -12,10 +12,6 @@ export interface TerrainMaterials {
   readonly skirt: MeshStandardNodeMaterial;
 }
 
-/**
- * Configure terrain shading natively for WebGPU using TSL.
- * This ensures that changes are visible under WebGPU Denderer.
- */
 export function createTerrainColorNode(config: TerrainConfig): Node<'vec3'> {
   const uMinHeight = uniform(config.TERRAIN_OFFSET_Y);
   const uMaxHeight = uniform(config.TERRAIN_OFFSET_Y + config.TERRAIN_HEIGHT_SCALE);

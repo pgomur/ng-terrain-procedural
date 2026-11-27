@@ -1,32 +1,4 @@
-import type { WorldPosition } from './chunk';
-
-/**
- * Engine initialization state
- */
-export type EngineInitState =
-  | 'uninitialized' // Nothing created
-  | 'initializing' // Requesting WebGPU device
-  | 'ready' // Ready to generate terrain
-  | 'failed' // Unrecoverable error
-  | 'lost';
-
-/**
- * Camera status in world coordinates
- * Updated every frame from Three.js
- */
-export interface CameraState {
-  readonly position: WorldPosition;
-  readonly forward: WorldPosition;
-  readonly up: WorldPosition;
-  readonly right: WorldPosition;
-  readonly fov: number;
-  readonly aspect: number;
-  readonly near: number;
-  readonly far: number;
-  readonly viewMatrix: Float32Array;
-  readonly projectionMatrix: Float32Array;
-  readonly viewProjectionMatrix: Float32Array;
-}
+export type EngineInitState = 'uninitialized' | 'initializing' | 'ready' | 'failed' | 'lost';
 
 export interface TerrainEngineStats {
   readonly fps: number;

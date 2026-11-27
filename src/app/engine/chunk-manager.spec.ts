@@ -17,13 +17,13 @@ const everything: FrustumPlanes = {
   constants: Array(6).fill(1e9),
 };
 const tick = () => new Promise((resolve) => setTimeout(resolve, 2));
-const cameraAt = (x: number, z: number) => ({ position: { x, y: 50, z } }) as never;
+const cameraAt = (x: number, z: number) => ({ x, y: 50, z });
 
 function createManager(generator: CpuHeightGenerator, cfg = config) {
   return new ChunkManager(cfg, generator as never);
 }
 
-async function runUntilSettled(manager: ChunkManager, camera: never, maxFrames = 3000) {
+async function runUntilSettled(manager: ChunkManager, camera: { x: number; y: number; z: number }, maxFrames = 3000) {
   for (let frame = 0; frame < maxFrames; frame++) {
     manager.update(camera, everything);
     manager.clearRenderChanges();

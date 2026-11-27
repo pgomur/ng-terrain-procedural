@@ -9,7 +9,7 @@ import { SceneGraph, SHADOW_CASTER_LAYER } from './scene-graph';
 import { SKY_HORIZON_COLOR, createSkyDome, skyColor } from '../shaders/sky.tsl';
 import { FrameStatsCollector } from './frame-stats';
 import { SUN_DIRECTION, SunLight } from './sun-light';
-import { CameraState, EngineInitState, FrameCallback, LoadingStage, TerrainEngineStats } from '../types/engine';
+import { EngineInitState, FrameCallback, LoadingStage, TerrainEngineStats } from '../types/engine';
 import { TerrainConfig, DEFAULT_TERRAIN_CONFIG } from '../types/terrain';
 import { Chunk, FrustumPlanes, WorldPosition } from '../types/chunk';
 
@@ -82,9 +82,6 @@ export class TerrainEngine {
   private readonly lastProjectionMatrix = new THREE.Matrix4();
   private readonly viewProjection = new THREE.Matrix4();
   private readonly frustum = new THREE.Frustum();
-  private readonly forward = new THREE.Vector3();
-  private readonly right = new THREE.Vector3();
-  private cameraState: Mutable<CameraState> | null = null;
   private readonly frustumNormals: Mutable<WorldPosition>[] = Array.from({ length: 6 }, () => ({
     x: 0,
     y: 0,
@@ -391,7 +388,6 @@ export class TerrainEngine {
       !this.camera.projectionMatrix.equals(this.lastProjectionMatrix);
 
     if (viewChanged) {
-      this.refreshCameraState(this.camera);
       this.refreshFrustumPlanes(this.camera);
       this.lastCameraMatrix.copy(this.camera.matrixWorld);
       this.lastProjectionMatrix.copy(this.camera.projectionMatrix);
@@ -401,9 +397,7 @@ export class TerrainEngine {
     this.updateSun();
 
     const streamingStart = performance.now();
-    if (!this.cameraState) return;
-
-    this.chunkManager.update(this.cameraState, this.frustumPlanes, viewChanged);
+    this.chunkManager.update(this.camera.position, this.frustumPlanes, viewChanged);
 
     this.sceneGraph.sync(
       this.chunkManager.getChunks(),
@@ -415,40 +409,8 @@ export class TerrainEngine {
     this.frameStats.addStreaming(performance.now() - streamingStart);
   }
 
-  private refreshCameraState(camera: THREE.PerspectiveCamera): void {
-    this.forward.set(0, 0, -1).applyQuaternion(camera.quaternion);
-    this.right.set(1, 0, 0).applyQuaternion(camera.quaternion);
-    this.viewProjection.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-
-    this.cameraState ??= {
-      position: camera.position,
-      forward: this.forward,
-      up: camera.up,
-      right: this.right,
-      fov: 0,
-      aspect: 0,
-      near: 0,
-      far: 0,
-      viewMatrix: new Float32Array(16),
-      projectionMatrix: new Float32Array(16),
-      viewProjectionMatrix: new Float32Array(16),
-    };
-
-    const state = this.cameraState;
-    state.fov = THREE.MathUtils.degToRad(camera.fov);
-    state.aspect = camera.aspect;
-    state.near = camera.near;
-    state.far = camera.far;
-    state.viewMatrix.set(camera.matrixWorldInverse.elements);
-    state.projectionMatrix.set(camera.projectionMatrix.elements);
-    state.viewProjectionMatrix.set(this.viewProjection.elements);
-  }
-
-  /**
-   * Extracts the frustum planes of the current camera.
-   * Uses Three.js native infrastructure for robustness with WebGPU.
-   */
   private refreshFrustumPlanes(camera: THREE.PerspectiveCamera): void {
+    this.viewProjection.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     this.frustum.setFromProjectionMatrix(this.viewProjection, camera.coordinateSystem, camera.reversedDepth);
 
     for (let i = 0; i < 6; i++) {
@@ -519,7 +481,6 @@ export class TerrainEngine {
     this.sunLight = null;
     this.camera = null;
     this.canvas = null;
-    this.cameraState = null;
     this.viewInitialized = false;
 
     this.statsSignal.set(null);

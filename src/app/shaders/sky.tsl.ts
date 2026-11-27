@@ -3,6 +3,7 @@ import {
   color,
   dot,
   float,
+  fwidth,
   max,
   mix,
   modelViewMatrix,
@@ -32,6 +33,8 @@ const CLOUD_SHADE_COLOR = 0xa9b8c8;
 const SUN_DISK_INNER = 0.99965;
 const SUN_DISK_OUTER = 0.9993;
 const CLOUD_SCALE = 1.4;
+const CLOUD_EDGE = 0.14;
+const CLOUD_EDGE_SOFTNESS = 0.12;
 const CLOUD_WIND = vec2(0.006, 0.0025);
 
 export interface SkyOptions {
@@ -62,10 +65,15 @@ export function skyColor(direction: Node<'vec3'>, sun: Vector3, options: SkyOpti
 
   if (options.clouds) {
     const plane = direction.xz.div(max(y, 0.04)).mul(CLOUD_SCALE).add(CLOUD_WIND.mul(time));
-    const density = mx_fractal_noise_float(vec3(plane, time.mul(0.01)), 5, 2.0, 0.5);
-    const coverage = smoothstep(0.02, 0.4, density)
-      .mul(smoothstep(0.03, 0.3, up))
-      .mul(0.92);
+    const position = vec3(plane, time.mul(0.01));
+    const broad = mx_fractal_noise_float(position, 3, 2.0, 0.5);
+    const fine = mx_fractal_noise_float(position.mul(8.0), 3, 2.0, 0.5).mul(0.08);
+    const density = broad.add(fine.mul(smoothstep(0.05, 0.3, up)));
+    const edge = max(fwidth(density), CLOUD_EDGE_SOFTNESS);
+    const silhouette = smoothstep(edge.negate().add(CLOUD_EDGE), edge.add(CLOUD_EDGE), density);
+    const coverage = silhouette
+      .mul(mix(0.62, 0.92, smoothstep(CLOUD_EDGE, 0.55, density)))
+      .mul(smoothstep(0.03, 0.3, up));
     const shading = mix(color(CLOUD_SHADE_COLOR), color(CLOUD_LIT_COLOR), smoothstep(-0.1, 0.6, density));
     const cloud = shading.add(color(SUN_GLOW_COLOR).mul(glow.mul(0.6)));
     result = mix(result, cloud, coverage);
