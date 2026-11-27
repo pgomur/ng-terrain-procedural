@@ -114,6 +114,9 @@ describe('TerrainComponent', () => {
     stats.set({ fps: 60, visibleByLod: [0, 0, 0, 0], heightAboveGround: null } as unknown as TerrainEngineStats);
     expect(refresh().querySelector('app-hud .hud')).not.toBeNull();
     expect(refresh().querySelector('.hud-hint-cta')?.textContent).toBe('Click to start');
+    const docs = refresh().querySelector('.hud-hint-docs');
+    expect(docs?.getAttribute('href')).toBe('docs/');
+    expect(docs?.getAttribute('target')).toBe('_blank');
   });
 
   it('replaces the loader with the WebGPU error when the engine fails', () => {
