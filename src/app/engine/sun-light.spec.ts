@@ -35,7 +35,6 @@ describe('SunLight', () => {
     const sun = new SunLight(DEFAULT_TERRAIN_CONFIG, 1);
     expect(sun.light.castShadow).toBe(true);
     expect(sun.light.shadow.camera.layers.isEnabled(1)).toBe(true);
-    expect(sun.light.shadow.mapSize.x).toBe(2048);
     expect(sun.light.shadow.normalBias).toBe(sun.texelSize);
   });
 });

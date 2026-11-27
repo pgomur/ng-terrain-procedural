@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { TerrainEngine, isWebGPUBackend } from './terrain-engine';
+import { TerrainEngine } from './terrain-engine';
 
 interface RendererSpy {
   setPixelRatio: ReturnType<typeof vi.fn>;
@@ -151,11 +151,46 @@ describe('TerrainEngine initial loading', () => {
   });
 });
 
-describe('isWebGPUBackend', () => {
-  it('accepts only the WebGPU backend', () => {
-    expect(isWebGPUBackend({ isWebGPUBackend: true })).toBe(true);
-    expect(isWebGPUBackend({ isWebGLBackend: true })).toBe(false);
-    expect(isWebGPUBackend({})).toBe(false);
-    expect(isWebGPUBackend(null)).toBe(false);
+describe('TerrainEngine device loss', () => {
+  interface LossInternals {
+    initGeneration: number;
+    isRunning: boolean;
+    initStateSignal: { set(state: string): void };
+    watchDeviceLoss(renderer: unknown, generation: number): void;
+  }
+
+  afterEach(() => vi.restoreAllMocks());
+
+  const rendererLosing = (lost: Promise<{ message: string }>) => ({ backend: { device: { lost } } });
+
+  it('stops the loop and reports the loss', async () => {
+    const engine = new TerrainEngine();
+    const internals = engine as unknown as LossInternals;
+    internals.initStateSignal.set('ready');
+    internals.isRunning = true;
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    internals.watchDeviceLoss(rendererLosing(Promise.resolve({ message: 'reset' })), internals.initGeneration);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(engine.initState()).toBe('lost');
+    expect(engine.isReady()).toBe(false);
+    expect(internals.isRunning).toBe(false);
+  });
+
+  it('ignores the loss caused by its own disposal', async () => {
+    const engine = new TerrainEngine();
+    const internals = engine as unknown as LossInternals;
+    internals.initStateSignal.set('ready');
+    let lose: (info: { message: string }) => void = () => undefined;
+    internals.watchDeviceLoss(rendererLosing(new Promise((resolve) => (lose = resolve))), internals.initGeneration);
+
+    engine.dispose();
+    lose({ message: 'destroyed' });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(engine.initState()).toBe('uninitialized');
   });
 });

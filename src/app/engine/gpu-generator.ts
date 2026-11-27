@@ -138,7 +138,7 @@ export class GPUGenerator<TOwner = unknown> {
     }
   }
 
-  estimatePageCapacity(resolution: number): number {
+  private estimatePageCapacity(resolution: number): number {
     const size = this.config.CHUNK_SIZE;
     const distances = this.config.LOD_DISTANCES;
     const maxDist = Math.max(...distances) * 1.2;
@@ -351,12 +351,13 @@ export class GPUGenerator<TOwner = unknown> {
         }
       })
       .catch((error: unknown) => {
+        if (this.disposed) return;
         console.error('[GPUGenerator] Bounds readback failed:', error);
         page.boundsPending.push(...batch);
       })
       .finally(() => {
         page.boundsInFlight = false;
-        if (!this.disposed && page.boundsPending.length > 0) this.startBoundsReadback(page);
+        if (!this.disposed && page.boundsPending.length > 0) this.dirtyPages.add(page);
       });
   }
 
@@ -383,8 +384,9 @@ export class GPUGenerator<TOwner = unknown> {
           this.listener?.onHeights(request.owner, valid ? new Float32Array(buffer) : null);
         })
         .catch((error: unknown) => {
+          if (this.disposed) return;
           console.error('[GPUGenerator] Height readback failed:', error);
-          if (!this.disposed) this.listener?.onHeights(request.owner, null);
+          this.listener?.onHeights(request.owner, null);
         });
     }
   }

@@ -1,6 +1,5 @@
 import * as THREE from 'three';
-import { MeshStandardNodeMaterial, type Node } from 'three/webgpu';
-import { vec3, vec4, smoothstep, positionWorld, fract, uniform, mix, fwidth, float, cameraViewMatrix } from 'three/tsl';
+import type { Node } from 'three/webgpu';
 import { Chunk, ChunkKey, ChunkLOD } from '../types/chunk';
 import { TerrainConfig } from '../types/terrain';
 import {
@@ -11,7 +10,8 @@ import {
   encodeSeamCode,
   skirtDepthFor,
 } from '../math/chunk-coord';
-import { createTerrainPositionNode } from '../shaders/elevation.tsl';
+import { createTerrainColorNode, createTerrainMaterials, type TerrainMaterials } from '../shaders/terrain-material.tsl';
+import { createChunkGeometry, type ChunkGeometry } from './chunk-geometry';
 import type { HeightPage } from './gpu-generator';
 
 export interface HeightPageSource {
@@ -50,23 +50,7 @@ interface ShadowRegion {
   readonly radius: number;
 }
 
-interface BaseGeometry {
-  readonly position: THREE.BufferAttribute;
-  readonly heightIndex: THREE.BufferAttribute;
-  readonly index: THREE.BufferAttribute;
-  readonly surfaceIndexCount: number;
-  readonly skirtIndexCount: number;
-}
-
-interface PageMaterials {
-  readonly surface: MeshStandardNodeMaterial;
-  readonly skirt: MeshStandardNodeMaterial;
-}
-
 export const SHADOW_CASTER_LAYER = 1;
-
-const SKIRT_POLYGON_OFFSET_FACTOR = 2;
-const SKIRT_POLYGON_OFFSET_UNITS = 4;
 
 const LODS: readonly ChunkLOD[] = [0, 1, 2, 3];
 const NEIGHBOR_STEPS: readonly (readonly [number, number])[] = [
@@ -83,8 +67,8 @@ export class SceneGraph {
 
   private readonly entries = new Map<string, CoordEntry>();
   private readonly batches = new Map<number, PageBatch>();
-  private readonly baseGeometries = new Map<number, BaseGeometry>();
-  private readonly materials = new Map<number, PageMaterials>();
+  private readonly baseGeometries = new Map<number, ChunkGeometry>();
+  private readonly materials = new Map<number, TerrainMaterials>();
   private readonly seamDirty = new Set<CoordEntry>();
   private readonly colorNode: Node<'vec3'>;
   private readonly seamsEnabled: boolean;
@@ -95,40 +79,9 @@ export class SceneGraph {
     this.scene = scene;
     this.config = config;
     this.heightSource = heightSource;
-    this.colorNode = this.createColorNode();
+    this.colorNode = createTerrainColorNode(config);
     this.seamsEnabled = config.SEAM_FITTING_ENABLED && supportsSeamStitching(config.CHUNK_RESOLUTIONS);
     this.skirtDepth = skirtDepthFor(config.TERRAIN_HEIGHT_SCALE);
-  }
-
-  /**
-   * Configure terrain shading natively for WebGPU using TSL.
-   * This ensures that changes are visible under WebGPU Denderer.
-   */
-  private createColorNode(): Node<'vec3'> {
-    const uMinHeight = uniform(this.config.TERRAIN_OFFSET_Y);
-    const uMaxHeight = uniform(this.config.TERRAIN_OFFSET_Y + this.config.TERRAIN_HEIGHT_SCALE);
-
-    const height = positionWorld.y;
-    const t = smoothstep(uMinHeight, uMaxHeight, height);
-
-    const sand = vec3(0.8, 0.75, 0.6);
-    const grass = vec3(0.35, 0.5, 0.25);
-    const rock = vec3(0.5, 0.5, 0.5);
-    const snow = vec3(0.95, 0.95, 1.0);
-
-    let baseColor = mix(sand, grass, smoothstep(float(0.0), float(0.25), t));
-    baseColor = mix(baseColor, rock, smoothstep(float(0.25), float(0.65), t));
-    baseColor = mix(baseColor, snow, smoothstep(float(0.65), float(0.95), t));
-
-    const gridSize = float(10.0);
-    const gridPos = positionWorld.xz.div(gridSize);
-
-    const grid = fract(gridPos.sub(0.5)).sub(0.5).abs().div(fwidth(gridPos));
-    const line = grid.x.min(grid.y);
-
-    const gridFactor = smoothstep(float(0.0), float(1.5), line).oneMinus();
-
-    return mix(baseColor, baseColor.mul(0.75), gridFactor);
   }
 
   sync(
@@ -184,16 +137,6 @@ export class SceneGraph {
   get shadowInstanceCount(): number {
     let count = 0;
     for (const batch of this.batches.values()) count += batch.shadowMesh.count;
-    return count;
-  }
-
-  get meshCount(): number {
-    return this.entries.size;
-  }
-
-  get drawBatchCount(): number {
-    let count = 0;
-    for (const batch of this.batches.values()) if (batch.mesh.count > 0) count++;
     return count;
   }
 
@@ -465,132 +408,20 @@ export class SceneGraph {
     return batch;
   }
 
-  private baseGeometryFor(resolution: number): BaseGeometry {
+  private baseGeometryFor(resolution: number): ChunkGeometry {
     const cached = this.baseGeometries.get(resolution);
     if (cached) return cached;
 
-    const size = this.config.CHUNK_SIZE;
-    const last = resolution - 1;
-    const gridCount = resolution * resolution;
-    const vertexCount = gridCount + 4 * resolution;
-
-    const positions = new Float32Array(vertexCount * 3);
-    const heightIndex = new Float32Array(vertexCount);
-
-    for (let z = 0; z < resolution; z++) {
-      for (let x = 0; x < resolution; x++) {
-        const i = z * resolution + x;
-        positions[i * 3] = (x / last) * size;
-        positions[i * 3 + 1] = 0;
-        positions[i * 3 + 2] = (z / last) * size;
-        heightIndex[i] = i;
-      }
-    }
-
-    const edgeIndex = [
-      (k: number) => k * resolution,
-      (k: number) => k * resolution + last,
-      (k: number) => k,
-      (k: number) => last * resolution + k,
-    ];
-
-    for (let side = 0; side < 4; side++) {
-      for (let k = 0; k < resolution; k++) {
-        const source = edgeIndex[side](k);
-        const v = gridCount + side * resolution + k;
-        positions[v * 3] = positions[source * 3];
-        positions[v * 3 + 1] = -1;
-        positions[v * 3 + 2] = positions[source * 3 + 2];
-        heightIndex[v] = source;
-      }
-    }
-
-    const gridTriangles = (resolution - 1) * (resolution - 1) * 2;
-    const skirtTriangles = 4 * (resolution - 1) * 2;
-    const indices = new Uint16Array((gridTriangles + skirtTriangles) * 3);
-    let idx = 0;
-
-    for (let z = 0; z < last; z++) {
-      for (let x = 0; x < last; x++) {
-        const a = z * resolution + x;
-        const b = z * resolution + (x + 1);
-        const c = (z + 1) * resolution + x;
-        const d = (z + 1) * resolution + (x + 1);
-        indices[idx++] = a;
-        indices[idx++] = c;
-        indices[idx++] = b;
-        indices[idx++] = b;
-        indices[idx++] = c;
-        indices[idx++] = d;
-      }
-    }
-
-    for (let side = 0; side < 4; side++) {
-      const reversed = side === 1 || side === 2;
-      for (let k = 0; k < last; k++) {
-        const e0 = edgeIndex[side](k);
-        const e1 = edgeIndex[side](k + 1);
-        const s0 = gridCount + side * resolution + k;
-        const s1 = s0 + 1;
-        if (reversed) {
-          indices[idx++] = e0;
-          indices[idx++] = e1;
-          indices[idx++] = s0;
-          indices[idx++] = e1;
-          indices[idx++] = s1;
-          indices[idx++] = s0;
-        } else {
-          indices[idx++] = e0;
-          indices[idx++] = s0;
-          indices[idx++] = e1;
-          indices[idx++] = e1;
-          indices[idx++] = s0;
-          indices[idx++] = s1;
-        }
-      }
-    }
-
-    const base: BaseGeometry = {
-      position: new THREE.BufferAttribute(positions, 3),
-      heightIndex: new THREE.BufferAttribute(heightIndex, 1),
-      index: new THREE.BufferAttribute(indices, 1),
-      surfaceIndexCount: gridTriangles * 3,
-      skirtIndexCount: skirtTriangles * 3,
-    };
+    const base = createChunkGeometry(resolution, this.config.CHUNK_SIZE);
     this.baseGeometries.set(resolution, base);
     return base;
   }
 
-  private materialsFor(page: HeightPage): PageMaterials {
+  private materialsFor(page: HeightPage): TerrainMaterials {
     const cached = this.materials.get(page.id);
     if (cached) return cached;
 
-    const surface = new MeshStandardNodeMaterial({
-      color: 0xffffff,
-      roughness: 0.8,
-      metalness: 0.1,
-      flatShading: true,
-      side: THREE.FrontSide,
-    });
-    surface.colorNode = vec4(this.colorNode, 1.0);
-    surface.positionNode = createTerrainPositionNode(page.heights, page.resolution, this.skirtDepth);
-    surface.castShadowPositionNode = createTerrainPositionNode(page.heights, page.resolution, 0);
-
-    const skirt = new MeshStandardNodeMaterial({
-      color: 0xffffff,
-      roughness: 0.8,
-      metalness: 0.1,
-      side: THREE.FrontSide,
-      polygonOffset: true,
-      polygonOffsetFactor: SKIRT_POLYGON_OFFSET_FACTOR,
-      polygonOffsetUnits: SKIRT_POLYGON_OFFSET_UNITS,
-    });
-    skirt.colorNode = vec4(this.colorNode, 1.0);
-    skirt.positionNode = surface.positionNode;
-    skirt.castShadowPositionNode = surface.castShadowPositionNode;
-    skirt.normalNode = cameraViewMatrix.mul(vec4(0, 1, 0, 0)).xyz.normalize();
-
-    const materials: PageMaterials = { surface, skirt };
+    const materials = createTerrainMaterials(page.heights, page.resolution, this.colorNode, this.skirtDepth);
     this.materials.set(page.id, materials);
     return materials;
   }

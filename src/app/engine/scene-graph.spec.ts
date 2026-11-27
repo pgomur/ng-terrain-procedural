@@ -5,7 +5,7 @@ import { ChunkManager } from './chunk-manager';
 import { SceneGraph, SHADOW_CASTER_LAYER } from './scene-graph';
 import { DEFAULT_TERRAIN_CONFIG, type TerrainConfig } from '../types/terrain';
 import type { ChunkLOD, FrustumPlanes } from '../types/chunk';
-import { encodeSeamCode, seamLodDiff, skirtDepthFor, stitchedHeight } from '../math/chunk-coord';
+import { encodeSeamCode, seamLodDiff, stitchedHeight } from '../math/chunk-coord';
 import { CpuHeightGenerator } from '../../testing/cpu-height-generator';
 
 const config: TerrainConfig = {
@@ -253,36 +253,4 @@ describe('SceneGraph', () => {
       );
     }
   }, 30_000);
-
-  it('skirts face outwards on all four sides', () => {
-    const graph = new SceneGraph(new THREE.Scene(), config, pageSource());
-    const resolution = 17;
-    const base = internals(graph).baseGeometryFor(resolution);
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', base.position);
-    geometry.setIndex(base.index);
-    geometry.addGroup(base.surfaceIndexCount, base.skirtIndexCount, 0);
-    const mesh = new THREE.Mesh(geometry, [new THREE.MeshBasicMaterial({ side: THREE.FrontSide })]);
-    mesh.updateMatrixWorld(true);
-
-    const ray = new THREE.Raycaster();
-    const c = 33.3;
-    const y = -0.37;
-    const cases: [THREE.Vector3, THREE.Vector3][] = [
-      [new THREE.Vector3(-50, y, c), new THREE.Vector3(1, 0, 0)],
-      [new THREE.Vector3(114, y, c), new THREE.Vector3(-1, 0, 0)],
-      [new THREE.Vector3(c, y, -50), new THREE.Vector3(0, 0, 1)],
-      [new THREE.Vector3(c, y, 114), new THREE.Vector3(0, 0, -1)],
-    ];
-    for (const [origin, direction] of cases) {
-      ray.set(origin, direction);
-      const hits = ray.intersectObject(mesh);
-      expect(hits.length).toBe(1);
-      expect(hits[0].face!.normal.dot(direction)).toBeLessThan(-0.99);
-      ray.set(new THREE.Vector3(c, y, c), direction.clone().negate());
-      expect(ray.intersectObject(mesh).length).toBe(0);
-    }
-    expect(base.skirtIndexCount).toBe(4 * (resolution - 1) * 6);
-    expect(skirtDepthFor(config.TERRAIN_HEIGHT_SCALE)).toBe(2);
-  });
 });

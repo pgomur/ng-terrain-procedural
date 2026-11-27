@@ -8,7 +8,8 @@ import {
   StreamingRequest,
   WorldPosition,
 } from '../types/chunk';
-import { TerrainConfig, CameraState } from '../types/terrain';
+import { TerrainConfig } from '../types/terrain';
+import { CameraState } from '../types/engine';
 import { CameraVelocityTracker } from './camera-velocity';
 import { GPUGenerator } from './gpu-generator';
 import { StreamingPriorityQueue } from './streaming-queue';
@@ -601,7 +602,7 @@ export class ChunkManager {
     );
   }
 
-  clearAllChunks(): void {
+  private clearAllChunks(): void {
     for (const [key, chunk] of this.chunks) {
       this.releaseChunk(key, chunk);
     }

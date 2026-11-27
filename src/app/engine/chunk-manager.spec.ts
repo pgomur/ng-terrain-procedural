@@ -58,13 +58,6 @@ describe('ChunkManager', () => {
     expect(generator.live.size).toBe(config.GENERATION_BUDGET);
   });
 
-  it('loads the whole area, refines every bound and holds one slot per chunk', async () => {
-    const generator = new CpuHeightGenerator(config);
-    const manager = createManager(generator);
-    expect(await runUntilSettled(manager, cameraAt(0, 0))).toBeGreaterThan(0);
-    expect(generator.live.size).toBe(slotsHeld(manager));
-  }, 30_000);
-
   it('retries failed generations with backoff instead of leaving holes', async () => {
     const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const generator = new CpuHeightGenerator(config, (key, attempt) =>

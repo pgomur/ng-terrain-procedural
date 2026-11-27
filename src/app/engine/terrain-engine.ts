@@ -9,8 +9,8 @@ import { SceneGraph, SHADOW_CASTER_LAYER } from './scene-graph';
 import { SKY_HORIZON_COLOR, createSkyDome, skyColor } from '../shaders/sky.tsl';
 import { FrameStatsCollector } from './frame-stats';
 import { SUN_DIRECTION, SunLight } from './sun-light';
-import { FrameCallback, LoadingStage, TerrainEngineStats } from '../types/engine';
-import { TerrainConfig, DEFAULT_TERRAIN_CONFIG, EngineInitState, CameraState } from '../types/terrain';
+import { CameraState, EngineInitState, FrameCallback, LoadingStage, TerrainEngineStats } from '../types/engine';
+import { TerrainConfig, DEFAULT_TERRAIN_CONFIG } from '../types/terrain';
 import { Chunk, FrustumPlanes, WorldPosition } from '../types/chunk';
 
 type Mutable<T> = { -readonly [K in keyof T]: T[K] };
@@ -31,7 +31,7 @@ function nextPaint(): Promise<void> {
   });
 }
 
-export function isWebGPUBackend(backend: unknown): boolean {
+function isWebGPUBackend(backend: unknown): boolean {
   return (backend as { readonly isWebGPUBackend?: boolean } | null)?.isWebGPUBackend === true;
 }
 
@@ -126,6 +126,7 @@ export class TerrainEngine {
         return false;
       }
       this.renderer = renderer;
+      this.watchDeviceLoss(renderer, generation);
 
       this.loadingStageSignal.set('shaders');
       await nextPaint();
@@ -143,6 +144,8 @@ export class TerrainEngine {
 
       this.setupResizeHandling();
 
+      if (generation !== this.initGeneration) return false;
+
       this.loadingStageSignal.set('terrain');
       this.initStateSignal.set('ready');
 
@@ -153,6 +156,22 @@ export class TerrainEngine {
       this.initStateSignal.set('failed');
       return false;
     }
+  }
+
+  private watchDeviceLoss(renderer: WebGPURenderer, generation: number): void {
+    const device = (renderer.backend as { readonly device?: GPUDevice }).device;
+    void device?.lost.then((info) => {
+      if (generation !== this.initGeneration) return;
+      this.handleDeviceLost(info.message);
+    });
+  }
+
+  private handleDeviceLost(message: string): void {
+    console.error('TerrainEngine: GPU device lost:', message);
+    this.initGeneration++;
+    this.stop();
+    this.statsSignal.set(null);
+    this.initStateSignal.set('lost');
   }
 
   private async createRenderer(canvas: HTMLCanvasElement): Promise<WebGPURenderer> {
