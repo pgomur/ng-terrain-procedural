@@ -17,112 +17,16 @@ canvas {
   touch-action: none; /* Previene scroll molesto en touch o trackpad */
   outline: none;
 }
-.hud,
 .hud-hint {
   box-sizing: border-box;
   z-index: 10;
-  background: rgba(12, 16, 22, 0.45);
-  backdrop-filter: blur(16px) saturate(140%);
-  -webkit-backdrop-filter: blur(16px) saturate(140%);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  background: var(--surface-background);
+  backdrop-filter: var(--surface-backdrop);
+  -webkit-backdrop-filter: var(--surface-backdrop);
+  box-shadow: var(--surface-outline);
   font: 500 13px/1.6 var(--app-font);
   pointer-events: none;
   user-select: none;
-}
-.hud {
-  position: absolute;
-  top: 20px;
-  left: 20px;
-  width: 252px;
-  max-height: calc(100% - 120px);
-  overflow: hidden;
-  padding: 16px 18px;
-  border-radius: 14px;
-  color: rgba(255, 255, 255, 0.92);
-  line-height: 1.65;
-  font-variant-numeric: tabular-nums;
-}
-.hud-primary {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.hud-fps {
-  font-size: 40px;
-  font-weight: 300;
-  line-height: 1;
-  letter-spacing: -0.02em;
-}
-.hud-unit {
-  align-self: flex-end;
-  margin-bottom: 4px;
-  color: rgba(255, 255, 255, 0.5);
-  font-size: 11px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-}
-.hud-frame {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  margin-left: auto;
-  line-height: 1.35;
-}
-.hud-muted {
-  color: rgba(255, 255, 255, 0.45);
-}
-.hud-section {
-  margin-top: 14px;
-  padding-top: 12px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-}
-.hud-title {
-  display: flex;
-  justify-content: space-between;
-  margin: 0 0 6px;
-  color: rgba(255, 255, 255, 0.4);
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-}
-.hud-title-value {
-  color: rgba(255, 255, 255, 0.92);
-  font-size: 13px;
-  font-weight: 500;
-  letter-spacing: 0;
-  text-transform: none;
-}
-.hud dl {
-  display: grid;
-  gap: 1px;
-  margin: 0;
-}
-.hud-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-}
-.hud dt {
-  color: rgba(255, 255, 255, 0.55);
-}
-.hud dd {
-  margin: 0;
-}
-.hud-row.is-bad dt,
-.hud-row.is-bad dd {
-  color: #fca5a5;
-}
-.hud-lods {
-  display: flex;
-  gap: 4px;
-}
-.hud-lods span:not(:first-child)::before {
-  content: '·';
-  margin-right: 4px;
-  color: rgba(255, 255, 255, 0.3);
-}
-.hud-hint {
   position: absolute;
   bottom: 24px;
   left: 50%;
@@ -152,22 +56,6 @@ canvas {
   color: rgba(255, 255, 255, 0.95);
   font: inherit;
   text-align: center;
-}
-@media (max-height: 760px) {
-  .hud {
-    top: 12px;
-    left: 12px;
-    padding: 14px 16px;
-    font-size: 12px;
-    line-height: 1.5;
-  }
-  .hud-fps {
-    font-size: 32px;
-  }
-  .hud-section {
-    margin-top: 10px;
-    padding-top: 8px;
-  }
 }
 /* Estilos de la Cruceta de Precisión Minimalista */
 .precision-crosshair {

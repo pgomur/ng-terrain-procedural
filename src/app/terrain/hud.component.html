@@ -1,0 +1,157 @@
+@let current = stats();
+<aside class="hud" aria-label="Engine diagnostics">
+  <header class="hud-primary">
+    <span class="hud-fps">{{ current.fps | number: '1.0-0' }}</span>
+    <span class="hud-unit">fps</span>
+    <span class="hud-frame">
+      <span>{{ current.frameMs | number: '1.1-1' }} ms</span>
+      <span class="hud-muted">max {{ current.maxFrameMs | number: '1.1-1' }} ms</span>
+    </span>
+  </header>
+
+  <section class="hud-section">
+    <h4 class="hud-title">Render</h4>
+    <dl>
+      <div class="hud-row">
+        <dt>CPU frame</dt>
+        <dd>{{ current.cpuFrameMs | number: '1.2-2' }} ms</dd>
+      </div>
+      <div class="hud-row">
+        <dt>Streaming</dt>
+        <dd>{{ current.chunkUpdateMs | number: '1.2-2' }} ms</dd>
+      </div>
+      <div class="hud-row">
+        <dt>Draw calls</dt>
+        <dd>{{ current.drawCalls }}</dd>
+      </div>
+      <div class="hud-row">
+        <dt>Triangles</dt>
+        <dd>{{ current.triangles | number: '1.0-0' }}</dd>
+      </div>
+      <div class="hud-row">
+        <dt>Resolution</dt>
+        <dd>
+          {{ current.renderWidth }} &times; {{ current.renderHeight }}
+          <span class="hud-muted">&#64;{{ current.pixelRatio | number: '1.0-2' }}x</span>
+        </dd>
+      </div>
+    </dl>
+  </section>
+
+  <section class="hud-section">
+    <h4 class="hud-title">Terrain</h4>
+    <dl>
+      <div class="hud-row">
+        <dt>Visible</dt>
+        <dd>{{ current.visibleChunks }}</dd>
+      </div>
+      <div class="hud-row">
+        <dt>LOD 0–3</dt>
+        <dd class="hud-lods">
+          <span>{{ current.visibleByLod[0] }}</span>
+          <span>{{ current.visibleByLod[1] }}</span>
+          <span>{{ current.visibleByLod[2] }}</span>
+          <span>{{ current.visibleByLod[3] }}</span>
+        </dd>
+      </div>
+      <div class="hud-row">
+        <dt>Ready</dt>
+        <dd>
+          {{ current.readyChunks }}
+          @if (current.unloadingChunks > 0) {
+            <span class="hud-muted">+{{ current.unloadingChunks }} unloading</span>
+          }
+        </dd>
+      </div>
+      <div class="hud-row">
+        <dt>Queue</dt>
+        <dd>
+          {{ current.pendingChunks }}
+          <span class="hud-muted">{{ current.queueUsage * 100 | number: '1.0-0' }}%</span>
+        </dd>
+      </div>
+      <div class="hud-row">
+        <dt>Generated</dt>
+        <dd>{{ current.generatedPerSecond | number: '1.0-0' }}/s</dd>
+      </div>
+      @if (current.failedChunks > 0) {
+        <div class="hud-row is-bad">
+          <dt>Failed</dt>
+          <dd>{{ current.failedChunks }}</dd>
+        </div>
+      }
+      <div class="hud-row">
+        <dt>Seed</dt>
+        <dd>{{ current.seed }}</dd>
+      </div>
+    </dl>
+  </section>
+
+  <section class="hud-section">
+    <h4 class="hud-title">
+      Terrain buffers
+      <span class="hud-title-value">{{ current.terrainBufferBytes / 1048576 | number: '1.1-1' }} MB</span>
+    </h4>
+    <dl>
+      <div class="hud-row">
+        <dt>Height atlas</dt>
+        <dd>{{ current.atlasBytes / 1048576 | number: '1.1-1' }} MB</dd>
+      </div>
+      <div class="hud-row">
+        <dt>Geometry</dt>
+        <dd>{{ current.geometryBytes / 1048576 | number: '1.1-1' }} MB</dd>
+      </div>
+      <div class="hud-row">
+        <dt>Read-back</dt>
+        <dd>{{ current.stagingBytes / 1048576 | number: '1.2-2' }} MB</dd>
+      </div>
+    </dl>
+  </section>
+
+  <section class="hud-section">
+    <h4 class="hud-title">Camera</h4>
+    <dl>
+      <div class="hud-row">
+        <dt>X</dt>
+        <dd>{{ current.cameraX | number: '1.0-0' }}</dd>
+      </div>
+      <div class="hud-row">
+        <dt>Y</dt>
+        <dd>{{ current.cameraY | number: '1.0-0' }}</dd>
+      </div>
+      <div class="hud-row">
+        <dt>Z</dt>
+        <dd>{{ current.cameraZ | number: '1.0-0' }}</dd>
+      </div>
+      <div class="hud-row">
+        <dt>Above ground</dt>
+        <dd>
+          @if (current.heightAboveGround !== null) {
+            {{ current.heightAboveGround | number: '1.1-1' }}
+          } @else {
+            &ndash;
+          }
+        </dd>
+      </div>
+      <div class="hud-row">
+        <dt>Heading</dt>
+        <dd>
+          {{ current.headingDeg | number: '1.0-0' }}&deg;
+          <span class="hud-muted">{{ cardinal(current.headingDeg) }}</span>
+        </dd>
+      </div>
+      <div class="hud-row">
+        <dt>Pitch</dt>
+        <dd>{{ current.pitchDeg | number: '1.0-0' }}&deg;</dd>
+      </div>
+      <div class="hud-row">
+        <dt>Speed</dt>
+        <dd>{{ current.cameraSpeed | number: '1.0-0' }} u/s</dd>
+      </div>
+      <div class="hud-row">
+        <dt>Chunk</dt>
+        <dd>{{ current.chunkX }}, {{ current.chunkZ }}</dd>
+      </div>
+    </dl>
+  </section>
+</aside>
