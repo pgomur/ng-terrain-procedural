@@ -1,0 +1,56 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "name": "Procedural WebGPU Terrain",
+  "entryPoints": [
+    "src/app"
+  ],
+  "entryPointStrategy": "expand",
+  "exclude": [
+    "**/*.spec.ts"
+  ],
+  "tsconfig": "tsconfig.app.json",
+  "out": "dist/ng-terrain-procedural/browser/docs",
+  "readme": "README.md",
+  "favicon": "public/favicon.svg",
+  "customCss": "typedoc.css",
+  "navigationLinks": {
+    "Live demo": "https://pgomur.github.io/ng-terrain-procedural/",
+    "GitHub": "https://github.com/pgomur/ng-terrain-procedural"
+  },
+  "sourceLinkTemplate": "https://github.com/pgomur/ng-terrain-procedural/blob/main/{path}#L{line}",
+  "excludePrivate": true,
+  "excludeProtected": true,
+  "excludeInternal": true,
+  "sort": [
+    "source-order"
+  ],
+  "hideGenerator": true,
+  "validation": {
+    "notExported": true,
+    "invalidLink": true,
+    "invalidPath": true,
+    "rewrittenLink": true,
+    "notDocumented": true,
+    "unusedMergeModuleWith": true
+  },
+  "treatWarningsAsErrors": true,
+  "useFirstParagraphOfCommentAsSummary": true,
+  "projectDocuments": [
+    "guides/architecture.md",
+    "guides/streaming.md",
+    "guides/gpu-generation.md",
+    "guides/rendering.md",
+    "guides/configuration.md",
+    "guides/diagnostics.md",
+    "guides/embedding.md"
+  ],
+  "searchInDocuments": true,
+  "searchInComments": true,
+  "navigation": {
+    "includeGroups": true
+  },
+  "groupOrder": [
+    "Guides",
+    "*"
+  ]
+}

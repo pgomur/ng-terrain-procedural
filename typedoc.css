@@ -1,0 +1,8 @@
+.tsd-page-title:has(+ .tsd-panel.tsd-typography) {
+  display: none;
+}
+
+pre {
+  white-space: pre;
+  overflow-x: auto;
+}

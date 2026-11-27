@@ -1,8 +1,10 @@
-<img src="public/favicon.svg" alt="" width="72" align="right" />
+<p align="center">
+  <img src="public/favicon.svg" alt="" width="88" />
+</p>
 
-# Procedural WebGPU Terrain Engine
+<h1 align="center">Procedural WebGPU Terrain Engine</h1>
 
-<p>
+<p align="center">
   <img src="https://img.shields.io/badge/Angular-22-DD0031?style=flat&logo=angular&logoColor=white" />
   <img src="https://img.shields.io/badge/TypeScript-6.0-3178C6?style=flat&logo=typescript&logoColor=white" />
   <img src="https://img.shields.io/badge/Three.js-0.187-000000?style=flat&logo=three.js&logoColor=white" />
@@ -13,7 +15,14 @@
   </a>
 </p>
 
-**[Live Demo](https://pgomur.github.io/ng-terrain-procedural/)**
+<p align="center">
+  <a href="https://pgomur.github.io/ng-terrain-procedural/"><b>Live Demo</b></a> ·
+  <a href="https://pgomur.github.io/ng-terrain-procedural/docs/"><b>API Documentation</b></a>
+</p>
+
+<p align="center">
+  <img src="assets/screenshot.jpg" alt="The terrain in the browser: rolling hills fading into fog under a cloudy sky, with the diagnostics panel on the left and the controls bar at the bottom" width="100%" />
+</p>
 
 An infinite procedural terrain that is generated, streamed and rendered on the GPU with WebGPU compute shaders written in Three.js Shading Language (TSL), hosted in a zoneless Angular application.
 
@@ -23,7 +32,7 @@ An infinite procedural terrain that is generated, streamed and rendered on the G
 
 - The world is a grid of square chunks (`CHUNK_SIZE`). Every chunk within `1.2 × max(LOD_DISTANCES)` of the camera is wanted, with a level of detail chosen by distance (four rings, LOD 0 to 3).
 - Missing chunks wait in a bounded priority queue (an indexed binary heap). Their score is the distance to the camera minus a look-ahead along the camera velocity, so chunks in the direction of travel are generated first. Requests that stop being wanted are dropped before they reach the GPU.
-- When a chunk changes LOD, the old version stays on screen until its replacement is ready. Chunks that leave the area are released after `UNLOAD_DELAY_MS`. Failed generations are retried with exponential backoff.
+- When a chunk changes LOD, the old version stays on screen until its replacement is ready. Chunks that leave the area are released after `UNLOAD_DELAY_MS`, or at once while more than `MAX_CHUNKS` are held. Failed generations are retried with exponential backoff.
 
 ### GPU generation
 
@@ -47,6 +56,22 @@ An infinite procedural terrain that is generated, streamed and rendered on the G
 - Zoneless Angular with signals and `OnPush`. The engine and Three.js are loaded lazily with `@defer`, keeping the initial bundle small.
 - A single `requestAnimationFrame` loop runs input, streaming and rendering in that order. Diagnostics are published to the UI four times per second: frame rate, average and worst frame time, CPU time per frame and for streaming, draw calls, triangles, render resolution, visible chunks per LOD, loaded and queued chunks, generation rate, GPU buffer sizes of the height atlas, terrain geometry and read-back staging, and the camera's position, height above ground, heading, pitch, speed and chunk.
 - If WebGPU is not available the app explains why instead of starting. If the GPU device is lost while running (a driver reset or a GPU timeout), the frame loop stops, pending read-backs are not retried, the cursor is released and a message asks to reload the page.
+
+## Documentation
+
+The public API is documented with [TSDoc](https://tsdoc.org) comments, and [TypeDoc](https://typedoc.org) turns them into the [API documentation](https://pgomur.github.io/ng-terrain-procedural/docs/), published next to the demo and linked from its controls bar. TypeDoc runs in CI with its warnings treated as errors, so an undocumented export or a broken `{@link}` fails the build.
+
+Besides the API reference, the documentation includes guides that explain how the engine works:
+
+| Guide | Covers |
+| --- | --- |
+| [Architecture](guides/architecture.md) | The pieces, start-up, the frame loop step by step, and the life of a chunk. |
+| [Streaming and levels of detail](guides/streaming.md) | Which chunks are wanted, priorities, lifecycle, retries, culling and collision. |
+| [GPU height generation](guides/gpu-generation.md) | The height atlas, compute dispatches, the noise, exact bounds and read-backs. |
+| [Rendering](guides/rendering.md) | Instanced draw calls, seams and skirts, materials, shadows, sky and fog. |
+| [Configuration](guides/configuration.md) | Every option with its default, its cost and some recipes. |
+| [Diagnostics panel](guides/diagnostics.md) | What each value of the panel measures and how to read it. |
+| [Embedding the terrain](guides/embedding.md) | The component, the engine's signals, the controls and a custom camera. |
 
 ## Requirements
 
@@ -83,6 +108,8 @@ The camera keeps a minimum height above the terrain.
 | `npm run lint` | ESLint (strict, type-checked) on TypeScript and templates |
 | `npm run format` | Format the sources with Prettier |
 | `npm run format:check` | Check formatting without changing files |
+| `npm run docs` | API documentation with TypeDoc in `dist/ng-terrain-procedural/browser/docs` (run it after the build) |
+| `npm run preview` | Production build plus documentation, served locally like GitHub Pages and opened in the browser |
 
 ## Configuration
 
@@ -96,7 +123,7 @@ Defaults are defined in `DEFAULT_TERRAIN_CONFIG` (`src/app/types/terrain.ts`). T
 | `GENERATION_BUDGET` | `16` | Chunks generated per frame |
 | `GENERATION_QUEUE_CAPACITY` | `256` | Pending requests kept in the priority queue |
 | `UNLOAD_DELAY_MS` | `960` | Milliseconds a chunk is kept after it stops being wanted |
-| `MAX_CHUNKS` | `1024` | Soft limit that evicts the oldest unloading chunks first |
+| `MAX_CHUNKS` | `1024` | Soft limit that evicts the oldest unloading chunks first; below the default wanted set (about 2,485), so left chunks are released at once |
 | `NOISE_SEED` | `12345` | World seed |
 | `NOISE_OCTAVES`, `NOISE_PERSISTENCE`, `NOISE_LACUNARITY` | `4`, `0.5`, `2` | Fractional Brownian motion parameters |
 | `NOISE_WARP_ENABLED` and `NOISE_WARP_*` | `false` | Domain warping |
@@ -133,8 +160,6 @@ src/app/
     loader.component.ts   Loading and error screen shared by the app and the terrain
   types/                  Shared types, engine statistics and default configuration
 src/testing/              CPU height generator used by the unit tests
+guides/                   Guides published with the API documentation
+assets/                   Images used by this README
 ```
-
-## License
-
-[MIT](LICENSE)

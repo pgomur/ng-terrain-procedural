@@ -9,7 +9,9 @@
     "test": "ng test",
     "lint": "ng lint",
     "format": "prettier --write \"src/**/*.{ts,html,scss}\"",
-    "format:check": "prettier --check \"src/**/*.{ts,html,scss}\""
+    "format:check": "prettier --check \"src/**/*.{ts,html,scss}\"",
+    "docs": "typedoc",
+    "preview": "ng build && typedoc && http-server dist/ng-terrain-procedural/browser -c-1 -o"
   },
   "prettier": {
     "printWidth": 120,
@@ -44,8 +46,10 @@
     "@webgpu/types": "^0.1.74",
     "angular-eslint": "^22.8.0",
     "eslint": "^10.16.0",
+    "http-server": "^14.1.1",
     "jsdom": "^29.1.1",
     "prettier": "^3.10.1",
+    "typedoc": "^0.28.20",
     "typescript": "~6.0.3",
     "typescript-eslint": "^8.74.0",
     "vitest": "^5.1.2"
